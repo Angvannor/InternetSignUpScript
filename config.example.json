@@ -1,0 +1,21 @@
+{
+  "_comment": "这是配置示例。真正的配置在 %LOCALAPPDATA%\\CampusNetAutoLogin\\config.json，不会进 Git。可以把这个文件复制过去改名后手工编辑，但更推荐直接运行 python login.py --setup。",
+
+  "login_url": "http://172.16.2.100/a70.htm?wlanuserip=10.53.53.219&wlanacip=null&wlanacname=null&vlanid=0&ip=10.53.53.219&ssid=null&areaID=null&mac=00-00-00-00-00-00",
+  "portal_host": "172.16.2.100",
+  "autofill_client_ip": true,
+
+  "account": "你的学号或手机号",
+  "operator": "中国移动",
+  "account_prefix": ",0,",
+
+  "engine": "auto",
+  "wait_network_seconds": 60,
+  "wait_page_seconds": 15,
+  "wait_result_seconds": 20,
+  "retry_times": 1,
+  "headless": false,
+
+  "password_backend": "auto",
+  "log_level": "INFO"
+}

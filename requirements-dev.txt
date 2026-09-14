@@ -1,0 +1,4 @@
+# 开发/测试用依赖（普通用户不需要装）
+#   pip install -r requirements-dev.txt
+#   python -m pytest -q
+pytest>=7.0
