@@ -83,6 +83,44 @@ class TestLoadSave(TempConfigDirMixin, unittest.TestCase):
         self.assertEqual(public["password_dpapi"], "<已保存>")
 
 
+class TestBrokenConfig(TempConfigDirMixin, unittest.TestCase):
+    """Windows 记事本另存为 UTF-8 会加 BOM，手工编辑配置是很常见的操作。"""
+
+    def test_config_with_utf8_bom_still_loads(self):
+        path = config_store.config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"account": "2021012345", "operator": "中国电信"}, ensure_ascii=False),
+            encoding="utf-8-sig",
+        )
+        settings = config_store.load_settings()
+        self.assertEqual(settings.account, "2021012345")
+        self.assertEqual(settings.operator, "中国电信")
+
+    def test_invalid_json_raises_a_friendly_error(self):
+        path = config_store.config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"account": "abc",,}', encoding="utf-8")
+        with self.assertRaises(config_store.ConfigError) as ctx:
+            config_store.load_settings()
+        self.assertIn("不是合法的 JSON", str(ctx.exception))
+
+    def test_json_array_raises_a_friendly_error(self):
+        path = config_store.config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("[1, 2, 3]", encoding="utf-8")
+        with self.assertRaises(config_store.ConfigError):
+            config_store.load_settings()
+
+    def test_cli_reports_broken_config_without_a_traceback(self):
+        import login as login_mod
+
+        path = config_store.config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{ this is not json", encoding="utf-8")
+        self.assertEqual(login_mod.main(["--status", "--quiet"]), login_mod.EXIT_USAGE)
+
+
 class TestPasswordStorePlain(TempConfigDirMixin, unittest.TestCase):
     def test_plain_backend_round_trip(self):
         settings = Settings()

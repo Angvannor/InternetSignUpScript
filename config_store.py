@@ -297,14 +297,36 @@ class PasswordStore:
 # 读写配置文件
 # --------------------------------------------------------------------------
 
+class ConfigError(Exception):
+    """配置文件读不了 / 不是合法 JSON。"""
+
+
 def load_settings(path: Optional[Path] = None) -> Settings:
-    """读取配置；文件不存在时返回默认配置。"""
+    """读取配置；文件不存在时返回默认配置。
+
+    编码用 utf-8-sig：Windows 记事本另存为 UTF-8 时会加 BOM，
+    用普通 utf-8 读会直接抛 JSONDecodeError（"Unexpected UTF-8 BOM"）。
+    """
     target = Path(path) if path else config_path()
     if not target.exists():
         return Settings()
 
-    with target.open("r", encoding="utf-8") as handle:
-        raw = json.load(handle)
+    try:
+        with target.open("r", encoding="utf-8-sig") as handle:
+            raw = json.load(handle)
+    except json.JSONDecodeError as error:
+        raise ConfigError(
+            "配置文件不是合法的 JSON：{0}（第 {1} 行第 {2} 列）\n"
+            "  文件：{3}\n"
+            "  修好它，或者删掉这个文件后重新运行：python login.py --setup".format(
+                error.msg, error.lineno, error.colno, target
+            )
+        )
+    except OSError as error:
+        raise ConfigError("读不了配置文件 {0}：{1}".format(target, error))
+
+    if not isinstance(raw, dict):
+        raise ConfigError("配置文件的内容应该是一个 JSON 对象，实际是 {0}".format(type(raw).__name__))
 
     known = {f for f in Settings.__dataclass_fields__}  # type: ignore[attr-defined]
     data = {k: v for k, v in raw.items() if k in known}

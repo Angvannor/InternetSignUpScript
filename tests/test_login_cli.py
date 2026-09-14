@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config_store  # noqa: E402
 import login as login_mod  # noqa: E402
+import netcheck  # noqa: E402
 from config_store import PasswordStore, Settings  # noqa: E402
 
 
@@ -177,6 +178,68 @@ class TestRunSetup(CliTestBase):
 
         self.assertEqual(code, login_mod.EXIT_OK)
         self.assertEqual(settings.operator, "中国电信", "选 3 应该是中国电信")
+
+    def test_copied_login_url_from_another_machine_is_flagged(self):
+        """配置里的 wlanuserip 既不是本机 IP -> 说明配置是从别人机器抄来的。"""
+        messages = []
+        settings = Settings()
+        settings.account = "19079100500"
+        settings.operator = "中国电信"
+        settings.login_url = (
+            "http://172.16.2.100/a70.htm?wlanuserip=10.53.53.219"
+            "&wlanacip=null&wlanacname=null&vlanid=0&ip=10.53.53.219"
+            "&ssid=null&areaID=null&mac=00-00-00-00-00-00"
+        )
+
+        with mock.patch.object(login_mod, "_log", side_effect=messages.append):
+            with mock.patch.object(netcheck, "guess_local_ip", return_value="10.16.27.254"):
+                with mock.patch.object(netcheck, "wait_for_network", return_value=True):
+                    with mock.patch.object(
+                        netcheck, "wait_for_campus",
+                        return_value=netcheck.ProbeResult(
+                            netcheck.STATUS_UNREACHABLE, "不在校园网"),
+                    ):
+                        login_mod.run_login(settings, PasswordStore(settings))
+
+        joined = "\n".join(messages)
+        self.assertIn("别的电脑", joined)
+        self.assertIn("10.53.53.219", joined)
+        self.assertIn("10.16.27.254", joined)
+
+    def test_setup_accepts_a_pasted_login_url(self):
+        os.environ["CAMPUSNET_ACCOUNT"] = "2021012345"
+        os.environ["CAMPUSNET_OPERATOR"] = "中国移动"
+        os.environ["CAMPUSNET_PASSWORD"] = "p@ssw0rd"
+        pasted = (
+            "http://172.16.2.100/a70.htm?wlanuserip=10.16.27.9"
+            "&wlanacip=172.16.2.1&wlanacname=AC-3&vlanid=0&ip=10.16.27.9"
+        )
+
+        settings = Settings()
+        settings.password_backend = "plain"
+        with mock.patch.object(login_mod, "run_login", return_value=0):
+            with mock.patch("builtins.input", return_value=pasted):
+                code = login_mod.run_setup(
+                    settings, PasswordStore(settings), interactive=True
+                )
+
+        self.assertEqual(code, login_mod.EXIT_OK)
+        self.assertIn("10.16.27.9", settings.login_url)
+        self.assertIn("wlanacname=AC-3", settings.login_url)
+
+    def test_setup_ignores_a_non_url_in_the_login_url_prompt(self):
+        os.environ["CAMPUSNET_ACCOUNT"] = "2021012345"
+        os.environ["CAMPUSNET_OPERATOR"] = "中国移动"
+        os.environ["CAMPUSNET_PASSWORD"] = "p@ssw0rd"
+
+        settings = Settings()
+        settings.password_backend = "plain"
+        original = settings.login_url
+        with mock.patch.object(login_mod, "run_login", return_value=0):
+            with mock.patch("builtins.input", return_value="随便乱打的东西"):
+                login_mod.run_setup(settings, PasswordStore(settings), interactive=True)
+
+        self.assertEqual(settings.login_url, original, "不像网址的内容应该被忽略")
 
     def test_non_interactive_setup_from_env_saves_everything(self):
         os.environ["CAMPUSNET_ACCOUNT"] = "2021012345"

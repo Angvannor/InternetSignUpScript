@@ -102,7 +102,7 @@ InternetSignUpScript/
 ├── requirements-dev.txt      # 测试用依赖（pytest）
 ├── config.example.json       # 配置示例（真正配置不在这里）
 ├── .gitignore                # 防止账号密码等敏感信息被提交
-├── tests/                    # 测试：124 个用例，全部可离线运行
+├── tests/                    # 测试：131 个用例，全部可离线运行
 │   ├── mock_portal.py        #   一个假的 Dr.COM 门户（端到端集成测试用）
 │   └── test_*.py
 └── README.md
@@ -135,12 +135,33 @@ python --version
 
 ### 第 2 步：拿到这个项目
 
+本仓库是**公开**的，所以**不需要装 git**，三种方式任选：
+
+**方式 A：直接下 ZIP（室友用这个最省事，不需要 git）**
+
+在浏览器里打开：
+
+```
+https://github.com/Angvannor/InternetSignUpScript/archive/refs/heads/main.zip
+```
+
+下载后右键 →「全部解压缩」→ 得到 `InternetSignUpScript-main` 文件夹，进去就能用。
+（`login.py`、`start.bat` 都在里面。）
+
+**方式 B：装了 git 的话**
+
 ```bat
-git clone <你的仓库地址>
+git clone https://github.com/Angvannor/InternetSignUpScript.git
 cd InternetSignUpScript
 ```
 
-或者直接把整个文件夹拷给室友（见第 11 节）。
+**方式 C：直接拷文件夹**
+
+整个文件夹复制过去就行 —— 这是个纯 Python 项目，没有编译、没有安装步骤，
+拷贝即用（见第 11 节）。
+
+> 📌 注意：用 ZIP / 拷文件夹方式拿到的是**快照**，不会自动更新。
+> 想拿最新版就重新下一次 ZIP。
 
 ### 第 3 步（可选）：安装第三方依赖
 
@@ -346,7 +367,7 @@ document.f0.submit();
 
 | 配置项 | 默认值 | 说明 |
 |---|---|---|
-| `login_url` | 你截图里的完整地址 | 认证页面地址。主机名和端口都从这里取，所以 `http://127.0.0.1:8080/xxx` 这种地址也能直接用 |
+| `login_url` | 你截图里的完整地址 | 认证页面地址。主机名和端口都从这里取，所以 `http://127.0.0.1:8080/xxx` 这种地址也能直接用。**换电脑时请用 `--setup` 粘贴本机浏览器的地址**，不要照抄别人的 |
 | `portal_host` | `172.16.2.100` | URL 里没有主机名时的兜底值 |
 | `eportal_port` | `801` | eportal 认证接口端口 |
 | `autofill_client_ip` | `true` | 每次运行把 URL 里的 `wlanuserip`/`ip` 换成当前网卡 IP。**换宿舍/换网口后必须开着**，否则地址里的旧 IP 会让认证失败 |
@@ -399,7 +420,7 @@ python login.py --setup
 
 ## 12. 测试方法
 
-### 测试（124 个用例，全部离线可跑，不需要校园网）
+### 测试（131 个用例，全部离线可跑，不需要校园网）
 
 ```bat
 python -m unittest discover -s tests -v
@@ -409,12 +430,12 @@ python -m unittest discover -s tests -v
 
 | 测试文件 | 覆盖内容 |
 |---|---|
-| `test_drcom_portal.py` | 运营商 → 账号后缀映射（和门户 `select` 的 `value` 逐一比对）；隐藏表单 `f0` 字段集合与真实模板**完全一致**；认证接口 URL 构造（端口 801、`c=ACSetting`、`a=Login`…）；用**真实抓取的失败页**验证 `Msg=01 + msga=''` → "账号或密码错误"；IP 自动修正；**从门户页面读出「服务器看到的客户端 IP」(v46ip/ss5)**；密码形状自检（全角字符/空格）且绝不泄露密码 |
+| `test_drcom_portal.py` | 运营商 → 账号后缀映射（和门户 `select` 的 `value` 逐一比对）；隐藏表单 `f0` 字段集合与真实模板**完全一致**；认证接口 URL 构造（端口 801、`c=ACSetting`、`a=Login`…）；用**真实抓取的失败页**验证 `Msg=01 + msga=''` → "账号或密码错误"；IP 自动修正；**从门户页面读出「服务器看到的客户端 IP」(v46ip/ss5)**；密码形状自检（全角字符/空格）且绝不泄露密码；**带 BOM(记事本另存) 的配置能正常读**、配置损坏时报友好错误而不是崩栈 |
 | `test_config_store.py` | 配置读写往返、未知字段不丢、`to_public_dict()` 不泄露密码、plain 后端、**DPAPI 加解密往返（含中文）** |
 | `test_netcheck.py` | gb2312 解码、等网络、探测校园网、**超时一定会返回、绝不无限等待** |
 | `test_engine_http.py` | HTTP 引擎全部分支：密码错 / 成功 / 已在线 / 无法识别 / 门户不可达 / 提交失败；**密码明文永不进入日志** |
 | `test_integration_mock_portal.py` | **端到端**：在一个假 Dr.COM 门户（`tests/mock_portal.py`）上跑完整的 `login.py`，验证提交的字段与真实门户一致、三种运营商后缀正确、"已在线"时不重复提交、"不在校园网"时安静退出且退出码为 0、**`--check-operator` 能把配错的运营商自动找出来并写回配置**、**门户报告的客户端 IP 优先于本机网卡 IP**（宿舍路由器 NAT 场景） |
-| `test_login_cli.py` | 命令行解析、`--quiet/--non-interactive` 绝不停下来提问、**初始化向导不设运营商默认值**（按回车不会默默选成中国移动）、`.bat` 文件必须是纯 ASCII |
+| `test_login_cli.py` | 命令行解析、`--quiet/--non-interactive` 绝不停下来提问、**初始化向导不设运营商默认值**（按回车不会默默选成中国移动）、**检测出登录地址是从别人机器抄来的**、`--setup` 能贴入本机地址、`.bat` 文件必须是纯 ASCII |
 
 ### 手动测试
 
@@ -658,11 +679,34 @@ git ls-files | findstr /i "config.json .log"
 ⚠ 密码警告：密码前后有空格（很容易是复制粘贴带进来的）
 ```
 
+**Q：项目是从别人电脑上拷过来的，登录一直失败。**
+
+**这是一个很隐蔽的坑**：`login_url` 里带着**那台机器**的认证参数
+（`wlanuserip` / `wlanacip` / `wlanacname` / `mac` / `session`），这些参数是
+认证服务器针对那台机器的会话下发的，照抄到另一台机器上就可能是错的。
+
+工具会自己发现这一点并在日志里警告：
+
+```
+⚠ 注意：配置里的 wlanuserip 是 10.53.53.219，而本机网卡 IP 是 10.16.27.254。
+    这说明登录地址（连同 wlanacip / wlanacname / mac）很可能是从**别的电脑**上
+    抄过来的，那些认证参数属于那台机器，照抄会导致登录失败。
+```
+
+**正确做法**（30 秒，一次搞定）：
+
+1. 在**这台电脑**上用浏览器打开任意一个网页（比如 `http://www.baidu.com`）；
+2. 如果被跳到校园网认证页，**把地址栏里的完整地址复制下来**
+   （形如 `http://172.16.2.100/a70.htm?wlanuserip=...&wlanacip=...&...`）；
+3. 运行 `python login.py --setup`，在"粘贴本机浏览器里的登录地址"那里粘贴进去。
+
+这样拿到的是**属于这台机器**的参数。`wlanuserip` / `ip` 之后每次运行仍会自动按
+当前 IP 修正，所以换宿舍、换 IP 都不用再改。
+
 **Q：账号填学号还是手机号？**
 
-门户支持「学工号 / 手机号 / Email」登录，但**手机号必须先在自助服务平台绑定过**。
-如果你填的是手机号且一直报"账号或密码错误"，**先换成学号再试一次** ——
-这是仅次于运营商选错的第二大坑。初始化时如果检测到手机号，工具会主动提醒。
+门户支持「学工号 / 手机号 / Email」登录，**只要在浏览器里能登进去就行**，
+两种都可以用。真正容易出错的是**运营商**（见上一条）和**登录地址被照抄**。
 
 **Q：想用 Selenium 但报错 "没有安装 selenium"。**
 

@@ -162,6 +162,24 @@ def run_setup(
     settings.operator = operator
     settings.login_url = settings.login_url or drcom_portal.DEFAULT_LOGIN_URL
 
+    # --- 登录地址（可选，但"抄别人机器上的地址"是很隐蔽的坑）--------------
+    login_url = os.environ.get("CAMPUSNET_LOGIN_URL") or ""
+    if not login_url and interactive:
+        LOGGER.info("")
+        LOGGER.info("登录地址（可以直接回车保持不变）：")
+        LOGGER.info("  如果这份项目是从**别人电脑**上拷过来的，地址里就带着那台机器的")
+        LOGGER.info("  认证参数（wlanuserip / wlanacip / wlanacname / mac），会导致登录失败。")
+        LOGGER.info("  最保险的做法：用**这台电脑**的浏览器打开任意网页，被跳到认证页后，")
+        LOGGER.info("  把地址栏里的完整地址（http://172.16.2.100/a70.htm?...）粘贴过来。")
+        LOGGER.info("  当前地址：{0}".format(settings.login_url))
+        login_url = _ask("粘贴本机浏览器里的登录地址", "")
+    if login_url:
+        if login_url.lower().startswith("http"):
+            settings.login_url = login_url.strip()
+            LOGGER.info("已使用你粘贴的登录地址。")
+        else:
+            LOGGER.warning("这不像一个网址，忽略了：{0}".format(login_url[:60]))
+
     # --- 密码自检：只报告"形状"，绝不打印密码内容 ------------------------
     LOGGER.info("密码自检：{0}".format(drcom_portal.password_fingerprint(password)))
     for warning in drcom_portal.password_warnings(password):
@@ -302,6 +320,22 @@ def run_login(
     )
     local_ip = netcheck.guess_local_ip(portal_host)
     login_url = settings.login_url
+
+    # 检测"这份配置是从别人电脑上抄来的"：地址里的 wlanuserip 既不是本机 IP，
+    # 也不是本网段的样子 —— 说明那些认证参数属于另一台机器。
+    configured_ip = drcom_portal.parse_login_url(settings.login_url).get("wlanuserip", "")
+    if settings.autofill_client_ip and configured_ip and local_ip and configured_ip != local_ip:
+        _log(
+            "⚠ 注意：配置里的 wlanuserip 是 {0}，而本机网卡 IP 是 {1}。\n"
+            "    这说明登录地址（连同 wlanacip / wlanacname / mac）很可能是从**别的电脑**上\n"
+            "    抄过来的，那些认证参数属于那台机器，照抄会导致登录失败。\n"
+            "    本次已自动按本机/门户的值修正；如果仍然失败，请运行\n"
+            "        python login.py --setup\n"
+            "    并把**本机浏览器**地址栏里那个完整的认证页地址粘贴进去。".format(
+                configured_ip, local_ip
+            )
+        )
+
     if settings.autofill_client_ip and local_ip:
         login_url, changed = drcom_portal.autofill_client_ip(settings.login_url, local_ip)
         if changed:
@@ -381,10 +415,10 @@ def run_login(
         )
         LOGGER.error("  1. 运营商选对了吗？      重选： python login.py --setup")
         LOGGER.error("  2. 不确定该选哪家？      自动判断： python login.py --check-operator")
-        LOGGER.error("  3. 账号填的是学号还是手机号？换另一种再试一次（手机号必须先在自助平台绑定过）")
-        LOGGER.error("  4. 账号前后有没有多打空格？")
-        LOGGER.error("  5. 密码注意大小写与全角/半角（中文输入法容易打出全角字符）。")
-        LOGGER.error("  6. 先用浏览器打开登录页手动登一次：手动能登、工具不能，请把日志发我。")
+        LOGGER.error("  3. 登录地址是不是从别人电脑抄来的？在**本机浏览器**里打开认证页，")
+        LOGGER.error("     把地址栏里的完整地址粘到 python login.py --setup 里的登录地址")
+        LOGGER.error("  4. 账号前后有没有多打空格？密码有没有全角字符/大小写问题？")
+        LOGGER.error("  5. 先用浏览器打开登录页手动登一次：手动能登、工具不能，请把日志发我。")
     return EXIT_LOGIN_FAILED
 
 
@@ -619,7 +653,11 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         config_file = Path(args.config)
 
-    settings = load_settings(config_file)
+    try:
+        settings = load_settings(config_file)
+    except config_store.ConfigError as error:
+        LOGGER.error("配置文件有问题：{0}".format(error))
+        return EXIT_USAGE
     if args.wait is not None:
         settings.wait_network_seconds = max(0, args.wait)
     if args.headless:
