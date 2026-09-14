@@ -219,6 +219,25 @@ class TestIpAutofill(MockPortalIntegrationTest):
             for path in get_paths:
                 self.assertIn("wlanuserip=127.0.0.1", path)
 
+    def test_portal_reported_ip_wins_over_the_local_interface_ip(self):
+        """宿舍路由器做 NAT 时，本机网卡 IP != 服务器看到的 IP，
+        提交的 wlanuserip 必须是**服务器看到的那个**，否则认证会失败。"""
+        with MockPortal(COMPOSITE_ACCOUNT, PASSWORD, ac_client_ip="10.16.27.9") as portal:
+            self.write_config(portal, autofill_client_ip=True)
+            self.assertEqual(self.run_cli(), login_mod.EXIT_OK)
+
+            posts = portal.post_requests()
+            self.assertEqual(len(posts), 1)
+            self.assertIn("wlanuserip=10.16.27.9", posts[0][1])
+            self.assertNotIn("wlanuserip=127.0.0.1", posts[0][1])
+
+    def test_autofill_disabled_keeps_the_configured_ip(self):
+        with MockPortal(COMPOSITE_ACCOUNT, PASSWORD, ac_client_ip="10.16.27.9") as portal:
+            self.write_config(portal, autofill_client_ip=False)
+            self.assertEqual(self.run_cli(), login_mod.EXIT_OK)
+            # 关闭自动修正时，URL 原样使用配置里的 127.0.0.1
+            self.assertIn("wlanuserip=127.0.0.1", portal.post_requests()[0][1])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

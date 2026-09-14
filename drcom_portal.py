@@ -394,7 +394,98 @@ def describe_markers(html: str) -> str:
 
 
 # --------------------------------------------------------------------------
-# 五、从真实页面里读出运营商下拉框（--probe 用，保证后缀不是我编的）
+# 五、从真实页面里读出"认证服务器看到的客户端 IP"
+# --------------------------------------------------------------------------
+#
+# a70.htm 是门户用 JavaScript 吐出来的，里面有这几行（真实抓取内容）：
+#
+#     v46ip='10.53.53.219';            // ← 认证服务器看到的客户端 IP
+#     ipm="ac100264";ss1="0010f367e3e2";ss2="0000";ss3="0a3535db";
+#     ss4="000000000000";ss5="10.53.53.219";ss6="172.16.2.100";
+#                                   // ↑ 客户端 IP        ↑ 服务器 IP
+#
+# 这个值比"本机网卡 IP"更可靠：如果宿舍里放了路由器做 NAT，
+# 本机网卡 IP（例如 192.168.x.x 或内网地址）根本不是认证服务器看到的那个 IP，
+# 而提交给门户的 wlanuserip 必须是**服务器看到的那个**。
+
+_IPV4_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+
+_V46IP_PATTERNS = (
+    r"\bv46ip\s*=\s*'([^']*)'",
+    r'\bv46ip\s*=\s*"([^"]*)"',
+    r"\bss5\s*=\s*'([^']*)'",
+    r'\bss5\s*=\s*"([^"]*)"',
+)
+
+
+def ac_reported_client_ip(html: str) -> Optional[str]:
+    """从门户页面里读出"认证服务器看到的客户端 IP"（v46ip / ss5）。
+
+    读不到就返回 None（例如失败页里只有 ss1~ss4，没有 ss5）。
+    """
+    for pattern in _V46IP_PATTERNS:
+        match = re.search(pattern, html or "")
+        if not match:
+            continue
+        value = match.group(1).strip()
+        if _IPV4_RE.match(value) and value != "0.0.0.0":
+            return value
+    return None
+
+
+# --------------------------------------------------------------------------
+# 六、账号 / 密码的"形状"自检（只描述形状，绝不泄露内容）
+# --------------------------------------------------------------------------
+
+#: 中国大陆手机号
+_MOBILE_RE = re.compile(r"^1[3-9]\d{9}$")
+
+
+def looks_like_mobile(account: str) -> bool:
+    """账号看起来是不是手机号。"""
+    return bool(_MOBILE_RE.match((account or "").strip()))
+
+
+def password_warnings(password: str) -> "List[str]":
+    """检查密码里最容易出错的东西，返回警告列表（**不含密码本身**）。
+
+    中文输入法很容易把半角字符打成全角（例如全角 ＡＢＣ１２３），
+    看起来一样，但和密码里的半角字符不相等 —— 这是"密码肯定没输错却登不上"
+    的经典原因之一。
+    """
+    warnings = []
+    if password != password.strip():
+        warnings.append("密码前后有空格（很容易是复制粘贴带进来的）")
+
+    wide = [c for c in password if "\uff01" <= c <= "\uff5e" or c == "\u3000"]
+    if wide:
+        warnings.append(
+            "含 {0} 个全角字符：中文输入法下打出的 ＡＢＣ１２３ 和半角的 ABC123 "
+            "看起来一样但并不相等".format(len(wide))
+        )
+    else:
+        non_ascii = [c for c in password if ord(c) > 127]
+        if non_ascii:
+            warnings.append("含 {0} 个非 ASCII 字符".format(len(non_ascii)))
+
+    return warnings
+
+
+def password_fingerprint(password: str) -> str:
+    """只描述密码的"形状"，**绝不包含密码内容**。
+
+    用来确认输入过程没被输入法搞坏，例如：
+        ``长度=8 字符，全部为半角 ASCII``
+        ``长度=12 字符，含非 ASCII 字符``
+    """
+    ascii_only = all(ord(c) < 128 for c in password)
+    shape = "全部为半角 ASCII" if ascii_only else "含非 ASCII 字符"
+    tail = "，前后有空格" if password != password.strip() else ""
+    return "长度={0} 字符，{1}{2}".format(len(password), shape, tail)
+
+
+# --------------------------------------------------------------------------
+# 七、从真实页面里读出运营商下拉框（--probe 用，保证后缀不是我编的）
 # --------------------------------------------------------------------------
 
 _SELECT_RE = re.compile(

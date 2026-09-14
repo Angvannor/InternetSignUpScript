@@ -276,5 +276,81 @@ class TestParseIspOptions(unittest.TestCase):
         self.assertEqual(options["选择运营商"], portal.ISP_UNSELECTED_VALUE)
 
 
+class TestAcReportedClientIp(unittest.TestCase):
+    """门户页面里的 v46ip / ss5 = 认证服务器看到的客户端 IP。"""
+
+    def test_parses_real_login_page_marker(self):
+        html = (
+            "sv=0;v4serip='172.16.2.100';m46=0;v46ip='10.53.53.219'   ;\n"
+            'ipm="ac100264";ss1="0010f367e3e2";ss4="000000000000";'
+            'ss5="10.53.53.219"   ;ss6="172.16.2.100"   ;'
+        )
+        self.assertEqual(portal.ac_reported_client_ip(html), "10.53.53.219")
+
+    def test_falls_back_to_ss5(self):
+        self.assertEqual(portal.ac_reported_client_ip('ss5="10.16.27.9";'), "10.16.27.9")
+
+    def test_returns_none_when_absent(self):
+        """失败页里只有 ss1~ss4，没有 ss5，必须返回 None 而不是瞎猜。"""
+        self.assertIsNone(portal.ac_reported_client_ip(REAL_FAILURE_PAGE))
+
+    def test_rejects_non_ip_values(self):
+        self.assertIsNone(portal.ac_reported_client_ip("v46ip='null';"))
+        self.assertIsNone(portal.ac_reported_client_ip("v46ip='';"))
+        self.assertIsNone(portal.ac_reported_client_ip("v46ip='0.0.0.0';"))
+        self.assertIsNone(portal.ac_reported_client_ip(""))
+
+
+class TestAccountShape(unittest.TestCase):
+    def test_looks_like_mobile(self):
+        self.assertTrue(portal.looks_like_mobile("19079100500"))
+        self.assertTrue(portal.looks_like_mobile("13800138000"))
+        # 13 位学号不是手机号
+        self.assertFalse(portal.looks_like_mobile("2025061021000221"))
+        self.assertFalse(portal.looks_like_mobile("12345"))
+        self.assertFalse(portal.looks_like_mobile(""))
+
+    def test_password_fingerprint_never_contains_the_password(self):
+        secret = "Abc12345"
+        text = portal.password_fingerprint(secret)
+        self.assertNotIn(secret, text)
+        self.assertIn("长度=8", text)
+        self.assertIn("半角 ASCII", text)
+
+    def test_password_fingerprint_flags_non_ascii(self):
+        text = portal.password_fingerprint("密码abc")
+        self.assertIn("长度=5", text)
+        self.assertIn("非 ASCII", text)
+
+    def test_full_width_password_is_warned_about(self):
+        """中文输入法打出的全角字符看起来和半角一样，但不相等。"""
+        warnings = portal.password_warnings("ＡＢＣ１２３")
+        self.assertTrue(warnings)
+        self.assertIn("全角", " ".join(warnings))
+
+    def test_normal_password_has_no_warnings(self):
+        self.assertEqual(portal.password_warnings("Abc12345"), [])
+
+    def test_surrounding_space_is_warned_about(self):
+        warnings = portal.password_warnings(" Abc12345")
+        self.assertIn("空格", " ".join(warnings))
+        self.assertTrue(portal.password_fingerprint(" Abc12345").endswith("前后有空格"))
+
+
+class TestDescribeMarkers(unittest.TestCase):
+    def test_describes_the_real_failure_page(self):
+        text = portal.describe_markers(REAL_FAILURE_PAGE)
+        self.assertIn("Dr.COMWebLoginID_2.htm", text)
+        self.assertIn("Msg=01", text)
+        self.assertIn("msga=''", text)
+
+    def test_describes_the_success_page(self):
+        text = portal.describe_markers("<!--Dr.COMWebLoginID_3.htm-->")
+        self.assertIn("Dr.COMWebLoginID_3.htm", text)
+
+    def test_handles_empty_input(self):
+        self.assertIn("未知", portal.describe_markers(""))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

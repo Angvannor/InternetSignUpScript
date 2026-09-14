@@ -162,6 +162,18 @@ def run_setup(
     settings.operator = operator
     settings.login_url = settings.login_url or drcom_portal.DEFAULT_LOGIN_URL
 
+    # --- 密码自检：只报告"形状"，绝不打印密码内容 ------------------------
+    LOGGER.info("密码自检：{0}".format(drcom_portal.password_fingerprint(password)))
+    for warning in drcom_portal.password_warnings(password):
+        LOGGER.warning("⚠ 密码警告：{0}".format(warning))
+
+    if drcom_portal.looks_like_mobile(account):
+        LOGGER.info(
+            "提示：你填的是**手机号**。门户支持「学工号 / 手机号 / Email」登录，\n"
+            "      但手机号必须先在自助服务平台绑定过才行。\n"
+            "      如果登录失败，请改用**学号**再试一次（这是最常见的坑）。"
+        )
+
     backend = store.save(password)
     saved_path = save_settings(settings)
     LOGGER.info("配置已保存到：{0}".format(saved_path))
@@ -306,6 +318,25 @@ def run_login(
         login_url, portal_host, settings.wait_network_seconds, log=_log
     )
 
+    # ---- 3.5 用"认证服务器看到的 IP"再修正一次 -------------------------
+    # 本机网卡 IP 不一定等于服务器看到的 IP（宿舍路由器做 NAT 时就不等）。
+    # 门户页面里的 v46ip/ss5 就是服务器看到的值，以它为准才稳。
+    if settings.autofill_client_ip and probe.html:
+        ac_ip = drcom_portal.ac_reported_client_ip(probe.html)
+        current_ip = drcom_portal.parse_login_url(login_url).get("wlanuserip", "")
+        if ac_ip and ac_ip != current_ip:
+            _log(
+                "登录地址里的客户端 IP 已按门户报告的值修正：{0} → {1}".format(
+                    current_ip or "空", ac_ip
+                )
+            )
+            login_url, _ = drcom_portal.autofill_client_ip(login_url, ac_ip)
+        if ac_ip and local_ip and ac_ip != local_ip:
+            _log(
+                "注意：本机网卡 IP 是 {0}，而门户看到的是 {1}，中间可能有路由器/NAT。"
+                "已按门户报告的值提交（这是正确的做法）。".format(local_ip, ac_ip)
+            )
+
     if probe.status == netcheck.STATUS_UNREACHABLE:
         _log("当前不在校园网环境（{0}），不做任何操作，退出。".format(probe.detail))
         return EXIT_OK
@@ -350,9 +381,10 @@ def run_login(
         )
         LOGGER.error("  1. 运营商选对了吗？      重选： python login.py --setup")
         LOGGER.error("  2. 不确定该选哪家？      自动判断： python login.py --check-operator")
-        LOGGER.error("  3. 账号是学号还是手机号？有没有多打空格？")
-        LOGGER.error("  4. 密码注意大小写与全角/半角（中文输入法容易打出全角字符）。")
-        LOGGER.error("  5. 先用浏览器打开登录页手动登一次，确认账号密码本身能登上。")
+        LOGGER.error("  3. 账号填的是学号还是手机号？换另一种再试一次（手机号必须先在自助平台绑定过）")
+        LOGGER.error("  4. 账号前后有没有多打空格？")
+        LOGGER.error("  5. 密码注意大小写与全角/半角（中文输入法容易打出全角字符）。")
+        LOGGER.error("  6. 先用浏览器打开登录页手动登一次：手动能登、工具不能，请把日志发我。")
     return EXIT_LOGIN_FAILED
 
 
@@ -379,6 +411,20 @@ def command_probe(settings: Settings) -> int:
     if not probe.html:
         LOGGER.error("拿不到页面内容，无法继续诊断（多半是不在校园网）。")
         return EXIT_OK
+
+    # 关键诊断：本机网卡 IP 和"认证服务器看到的 IP"是否一致
+    ac_ip = drcom_portal.ac_reported_client_ip(probe.html)
+    LOGGER.info("认证服务器看到的客户端 IP：{0}".format(ac_ip or "（页面里没报告）"))
+    if ac_ip and local_ip and ac_ip != local_ip:
+        LOGGER.warning(
+            "两者不一致！本机网卡是 {0}，服务器看到的是 {1}。\n"
+            "    说明你和认证服务器之间还有一层路由器/NAT。\n"
+            "    提交给门户的 wlanuserip 必须是服务器看到的那个，本工具已按此处理。".format(
+                local_ip, ac_ip
+            )
+        )
+    elif ac_ip:
+        LOGGER.info("两者一致，网络路径上没有 NAT。")
 
     options = drcom_portal.parse_isp_options(probe.html)
     if options:

@@ -18,6 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 LOGIN_PAGE = (
     "<!doctype html><html><head><title>上网登录窗</title>\n"
     "<!--Dr.COMWebLoginID_0.htm-->\n"
+    "<script>v46ip='127.0.0.1';ss5=\"127.0.0.1\";ss6=\"172.16.2.100\";</script>\n"
     "</head><body></body></html>"
 )
 
@@ -64,7 +65,17 @@ class _Handler(BaseHTTPRequestHandler):
         server = self.server
         server.requests.append(("GET", self.path, None))
         if self.path.startswith("/a70.htm"):
-            self._send(SUCCESS_PAGE if server.logged_in else LOGIN_PAGE)
+            if server.logged_in:
+                self._send(SUCCESS_PAGE)
+            elif getattr(server, "ac_client_ip", None):
+                # 模拟"认证服务器看到的 IP 与本机网卡 IP 不同"（宿舍路由器 NAT）
+                page = LOGIN_PAGE.replace(
+                    "v46ip='127.0.0.1';ss5=\"127.0.0.1\";",
+                    "v46ip='{0}';ss5=\"{0}\";".format(server.ac_client_ip),
+                )
+                self._send(page)
+            else:
+                self._send(LOGIN_PAGE)
         else:
             self._send("<html>not found</html>", code=404)
 
@@ -98,9 +109,11 @@ class MockPortal:
             portal.logged_in   # 端口收到正确凭据后变成 True
     """
 
-    def __init__(self, account: str, password: str):
+    def __init__(self, account: str, password: str, ac_client_ip: str = ""):
         self.expected_account = account
         self.expected_password = password
+        #: 模拟"认证服务器看到的客户端 IP"（留空表示与 127.0.0.1 相同）
+        self.ac_client_ip = ac_client_ip
         self.requests = []
         self.server = None
 
@@ -111,6 +124,7 @@ class MockPortal:
         self.server.requests = self.requests
         self.server.expected_account = self.expected_account
         self.server.expected_password = self.expected_password
+        self.server.ac_client_ip = self.ac_client_ip
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
