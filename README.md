@@ -438,42 +438,72 @@ python login.py --test      :: 完整跑一遍自动登录
 
 ## 13. 推送到 Git
 
-### ⚠️ 先看这条：本机当前推不上去
+### ⚠️ 这台电脑的 Git 有两个坑，先看这条
 
-在这台电脑上实测过（2026-09-14，未登录校园网时）：
+第一次推送时失败了好几次，实测（2026-09-14）后定位到**两个和校园网无关**的原因：
 
-| 目标 | 结果 |
-|---|---|
-| `http://www.msftconnecttest.com/connecttest.txt` | ✅ 返回真实内容，普通 HTTP 能通 |
-| `https://pypi.org` / `https://github.com` / `https://gitee.com` / `https://mirrors.tuna.tsinghua.edu.cn` | ❌ 全部 `基础连接已经关闭`（TLS 被校园网关重置） |
-| `git ls-remote https://github.com/...` | ❌ `Failed to connect to github.com port 443 via 127.0.0.1`（全局 `http.proxy` 指向 `127.0.0.1:7897`，但那个端口没有在监听） |
-| 同上但**绕过代理** | ❌ `schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS`（TLS 握手被掐断） |
-| `~/.ssh/id_rsa` / `id_ed25519` | ❌ 不存在 |
+**坑 1：git 用的是 Windows 自带的 schannel TLS，而这台机器上的 schannel 是坏的。**
 
-结论：**校园网认证之前，所有 HTTPS 都被掐断**，而 `git push` 走 HTTPS/SSH，
-所以现在无论如何都推不上去。同一条链路也解释了为什么那三个 pip 源全装不上。
+```
+$ git ls-remote https://github.com/...
+  fatal: ... schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS (0x8009030e)
+$ curl.exe https://github.com
+  curl: (35) schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS
+```
 
-**解决办法（任选其一）：**
+注意这个错误发生在**任何网络交互之前**（AcquireCredentialsHandle 是纯本地调用），
+所以它跟校园网、防火墙、代理都无关。同一个现象也让 PowerShell 的
+`Invoke-WebRequest https://...` 一律报「基础连接已经关闭: 接收时发生错误」。
 
-1. 先让本工具把校园网登上（顺便也就验证了工具本身）：
+**决定性证据**：改用不走 schannel 的客户端（Python 自带 OpenSSL）访问同一个地址：
 
-   ```bat
-   python login.py --setup
-   ```
+```
+>>> urllib ... https://github.com
+OK 200 577131 bytes          ← 网络其实是通的！
+```
 
-   登录成功后 HTTPS 就通了。如果推送仍然报连不上，说明本机还挂着一条
-   指向未运行代理的 Git 配置，清掉它再推：
+**坑 2：全局 `http.proxy` 指向 `http://127.0.0.1:7897`，而那一刻代理软件没在运行。**
 
-   ```bat
-   git config --global --unset http.proxy
-   git config --global --unset https.proxy
-   ```
+```
+$ git ls-remote https://github.com/...
+  fatal: Failed to connect to github.com port 443 via 127.0.0.1 ... Could not connect to server
+```
 
-2. 启动你的代理软件（让 `127.0.0.1:7897` 真的在监听），再推。
+另外，**直连**（`-c http.proxy=`）在校园网未认证时并不稳定：同一分钟内
+python 能拿到 200，git 却时而 `Connection was reset`、时而 `Could not connect`。
 
-3. 用手机热点 / 家里网络，再推。
+### ✅ 实测可用的组合
 
-4. 如果学校要求二次验证或 MAC 绑定，本工具帮不上，请先手动登录校园网。
+**OpenSSL 后端 + 正在运行的代理** —— 这样推就成功了：
+
+```bat
+:: 1) 永久修掉 schannel 这个坑（推荐，一次性）
+git config --global http.sslBackend openssl
+
+:: 2) 确认代理软件在运行（127.0.0.1:7897 真的在监听）
+::    如果不用代理，就改成：git config --global --unset http.proxy
+::                      git config --global --unset https.proxy
+
+:: 3) 推送
+git push -u origin main
+```
+
+本次实际执行并成功的命令：
+
+```bat
+git -c http.sslBackend=openssl push -u origin main
+```
+
+结果：
+
+```
+To https://github.com/Angvannor/InternetSignUpScript.git
+ * [new branch]      main -> main
+branch 'main' set up to track 'origin/main'.
+```
+
+> 小贴士：装了 `keyring` 之前，校园网没认证时装不了 pip；但 **git 推送不受影响**，
+> 只要能连上代理就行 —— 这两件事走的是不同的链路。
 
 ### 推送命令
 
@@ -486,10 +516,20 @@ push_to_git.bat https://github.com/你的用户名/InternetSignUpScript.git
 
 **方式 B：手动**
 
-先到 GitHub / Gitee 网页上**新建一个空仓库**（不要勾选 "Add a README"，
-否则会有冲突），然后：
+本仓库**已经建好并推送完成**（`origin` = `https://github.com/Angvannor/InternetSignUpScript.git`，
+分支 `main`）。日常改完代码只要：
 
 ```bat
+git add -A
+git commit -m "说明这次改了什么"
+git push
+```
+
+如果换到一台新电脑从零开始，并且要推到 GitHub / Gitee 上一个**新的空仓库**
+（不要勾选 "Add a README"，否则会有冲突）：
+
+```bat
+git config --global http.sslBackend openssl   :: 只在 schannel 坏掉的机器上需要
 git init
 git add -A
 git commit -m "feat: 校园网自动登录工具（Dr.COM eportal）"
