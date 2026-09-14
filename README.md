@@ -444,11 +444,13 @@ python login.py --test      :: 完整跑一遍自动登录
 
 | 目标 | 结果 |
 |---|---|
-| `http://www.msftconnecttest.com/connecttest.txt` | ✅ 返回真实内容，能通 |
+| `http://www.msftconnecttest.com/connecttest.txt` | ✅ 返回真实内容，普通 HTTP 能通 |
 | `https://pypi.org` / `https://github.com` / `https://gitee.com` / `https://mirrors.tuna.tsinghua.edu.cn` | ❌ 全部 `基础连接已经关闭`（TLS 被校园网关重置） |
+| `git ls-remote https://github.com/...` | ❌ `Failed to connect to github.com port 443 via 127.0.0.1`（全局 `http.proxy` 指向 `127.0.0.1:7897`，但那个端口没有在监听） |
+| 同上但**绕过代理** | ❌ `schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS`（TLS 握手被掐断） |
 | `~/.ssh/id_rsa` / `id_ed25519` | ❌ 不存在 |
 
-也就是说：**校园网认证之前，所有 HTTPS 都被掐断**，而 `git push` 走 HTTPS/SSH，
+结论：**校园网认证之前，所有 HTTPS 都被掐断**，而 `git push` 走 HTTPS/SSH，
 所以现在无论如何都推不上去。同一条链路也解释了为什么那三个 pip 源全装不上。
 
 **解决办法（任选其一）：**
@@ -459,11 +461,19 @@ python login.py --test      :: 完整跑一遍自动登录
    python login.py --setup
    ```
 
-   登录成功后 HTTPS 就通了，再执行下面的推送命令。
+   登录成功后 HTTPS 就通了。如果推送仍然报连不上，说明本机还挂着一条
+   指向未运行代理的 Git 配置，清掉它再推：
 
-2. 用手机热点 / 家里网络，再推。
+   ```bat
+   git config --global --unset http.proxy
+   git config --global --unset https.proxy
+   ```
 
-3. 如果学校要求二次验证或 MAC 绑定，本工具帮不上，请先手动登录校园网。
+2. 启动你的代理软件（让 `127.0.0.1:7897` 真的在监听），再推。
+
+3. 用手机热点 / 家里网络，再推。
+
+4. 如果学校要求二次验证或 MAC 绑定，本工具帮不上，请先手动登录校园网。
 
 ### 推送命令
 
