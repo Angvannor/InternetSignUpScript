@@ -148,6 +148,46 @@ class TestFailedLogin(MockPortalIntegrationTest):
             self.assertFalse(portal.logged_in)
 
 
+class TestCheckOperator(MockPortalIntegrationTest):
+    """--check-operator：运营商配错时应该能自动找出正确的那家。"""
+
+    def test_finds_and_saves_the_right_operator(self):
+        # 门户只认 中国电信(@telecom)，但配置里错写成 中国移动
+        telecom_account = "{0}{1}{2}".format(",0,", ACCOUNT, "@telecom")
+        with MockPortal(telecom_account, PASSWORD) as portal:
+            self.write_config(portal, operator="中国移动")
+
+            argv = ["--check-operator", "--quiet", "--config", self.config_file]
+            code = login_mod.main(argv)
+
+            self.assertEqual(code, login_mod.EXIT_OK, "应该试出正确运营商并成功登录")
+            self.assertTrue(portal.logged_in)
+
+            # 配置里的运营商应该被自动改正并落盘
+            with open(self.config_file, "r", encoding="utf-8") as handle:
+                saved = json.load(handle)
+            self.assertEqual(saved["operator"], "中国电信")
+
+    def test_reports_failure_when_no_operator_works(self):
+        """三家都不行时，必须明确说是账号/密码问题，而不是含糊地报登录失败。"""
+        with MockPortal(",0,someone-else@cmcc", PASSWORD) as portal:
+            self.write_config(portal, operator="中国移动")
+
+            argv = ["--check-operator", "--quiet", "--config", self.config_file]
+            code = login_mod.main(argv)
+
+            self.assertEqual(code, login_mod.EXIT_LOGIN_FAILED)
+            self.assertFalse(portal.logged_in)
+            # 三次尝试：配置里的 + 另外两家
+            self.assertEqual(len(portal.post_requests()), 3)
+
+    def test_refuses_to_run_without_a_saved_password(self):
+        with MockPortal(COMPOSITE_ACCOUNT, PASSWORD) as portal:
+            self.write_config(portal, password_plain="")
+            argv = ["--check-operator", "--quiet", "--config", self.config_file]
+            self.assertEqual(login_mod.main(argv), login_mod.EXIT_USAGE)
+
+
 class TestNotOnCampus(MockPortalIntegrationTest):
     def test_unreachable_portal_exits_quietly_without_posting(self):
         """离开校园网（认证页打不开）时必须安静退出，不提交、不报错。"""

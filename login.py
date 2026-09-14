@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import getpass
 import logging
 import logging.handlers
@@ -121,16 +122,25 @@ def run_setup(
         return EXIT_USAGE
 
     # --- 运营商 ---
-    operator = os.environ.get("CAMPUSNET_OPERATOR")
+    # 重要：三家运营商在校园网里是**各自独立的账号库**（账号后缀 @cmcc/@unicom/@telecom）。
+    # 选错运营商的表现就是"账号密码明明是对的，门户却报账号或密码错误"。
+    # 所以这里**故意不设默认值**，必须明确选一次 —— 早期版本默认按回车=中国移动，
+    # 会让电信/联通的同学默默用错运营商。
+    operator = _parse_operator_choice(os.environ.get("CAMPUSNET_OPERATOR", ""), settings)
     if not operator and interactive:
-        LOGGER.info("请选择运营商：")
+        LOGGER.info("请选择运营商（必选！三家是独立账号库，选错会报「账号或密码错误」）：")
         for index, name in enumerate(drcom_portal.ISP_CHOICES, start=1):
             LOGGER.info("  {0}. {1}（账号后缀 {2}）".format(
                 index, name, drcom_portal.ISP_SUFFIX_BY_NAME[name]))
-        raw = _ask("请输入序号 1-3", settings.operator or "1")
-        operator = _parse_operator_choice(raw, settings)
+        if settings.operator:
+            LOGGER.info("  （当前配置里是：{0}）".format(settings.operator))
+        for _attempt in range(3):
+            raw = _ask("请输入序号 1-3（不能直接回车）", "")
+            operator = _parse_operator_choice(raw, settings)
+            if operator:
+                break
     if not operator:
-        LOGGER.error("运营商不能为空，配置未保存。")
+        LOGGER.error("没有确定运营商，配置未保存。请重新运行：python login.py --setup")
         return EXIT_USAGE
 
     # --- 密码 ---
@@ -164,21 +174,44 @@ def run_setup(
 
 
 def _parse_operator_choice(raw: str, settings: Settings) -> str:
-    """把 "1" / "中国移动" / "@cmcc" 统一成运营商名字或后缀。"""
+    """把 "1" / "中国移动" / "@cmcc" 统一成运营商名字（必要时透传未知后缀）。
+
+    解析不出来时返回 ""，**绝不猜**——猜错运营商的后果是"账号密码没错却登录失败"。
+    """
     raw = (raw or "").strip()
+    if not raw:
+        return ""
+
     if raw.isdigit():
         index = int(raw)
         if 1 <= index <= len(drcom_portal.ISP_CHOICES):
             return drcom_portal.ISP_CHOICES[index - 1]
+        LOGGER.error("序号只能是 1、2、3，收到的是“{0}”。".format(raw))
+        return ""
+
     if raw in drcom_portal.ISP_SUFFIX_BY_NAME:
         return raw
+
     if raw.startswith("@"):
-        return raw
-    # 允许输入 "移动" 这种简写
-    for name in drcom_portal.ISP_CHOICES:
-        if raw and (raw in name or name in raw):
-            return name
-    LOGGER.error("无法识别的运营商“{0}”，请填 1/2/3 或 中国移动/中国联通/中国电信。".format(raw))
+        for name, suffix in drcom_portal.ISP_SUFFIX_BY_NAME.items():
+            if suffix == raw:
+                return name          # 规范成名字，方便日志和配置统一
+        return raw                   # 学校若新增了别家运营商，原样透传
+
+    # 简写（"移动"/"电信"）：必须唯一匹配，避免"中国"这种歧义输入默默选了第一家
+    matches = [name for name in drcom_portal.ISP_CHOICES if raw in name or name in raw]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        LOGGER.error(
+            "“{0}”同时匹配到 {1}，太含糊了，请直接输入 1、2 或 3。".format(
+                raw, "、".join(matches))
+        )
+        return ""
+
+    LOGGER.error(
+        "无法识别的运营商“{0}”，请填 1/2/3，或 中国移动/中国联通/中国电信。".format(raw)
+    )
     return ""
 
 
@@ -308,7 +341,18 @@ def run_login(
 
     LOGGER.error("登录失败：{0}".format(result.detail))
     if result.status == "bad_credentials":
-        LOGGER.error("请检查账号密码是否正确，或执行 python login.py --setup 重新配置。")
+        used = settings.operator or "未设置"
+        suffix = drcom_portal.isp_suffix(settings.operator) or "无"
+        LOGGER.error("本次用的运营商：{0}（账号后缀 {1}）".format(used, suffix))
+        LOGGER.error(
+            "提醒：三家运营商是**各自独立的账号库**。运营商选错时的表现就是\n"
+            "      「账号密码明明没错，门户却报账号或密码错误」。请按顺序排查："
+        )
+        LOGGER.error("  1. 运营商选对了吗？      重选： python login.py --setup")
+        LOGGER.error("  2. 不确定该选哪家？      自动判断： python login.py --check-operator")
+        LOGGER.error("  3. 账号是学号还是手机号？有没有多打空格？")
+        LOGGER.error("  4. 密码注意大小写与全角/半角（中文输入法容易打出全角字符）。")
+        LOGGER.error("  5. 先用浏览器打开登录页手动登一次，确认账号密码本身能登上。")
     return EXIT_LOGIN_FAILED
 
 
@@ -394,6 +438,83 @@ def command_forget(settings: Settings, store: PasswordStore) -> int:
     return EXIT_OK
 
 
+def command_check_operator(settings: Settings, store: PasswordStore) -> int:
+    """依次用三家运营商试登录，判断这个账号到底属于哪一家。
+
+    这是"账号密码没错、门户却报账号或密码错误"最有效的排查手段：
+    三家运营商是各自独立的账号库，选错了就一定会报错。
+
+    代价：最多产生 3 次认证尝试。如果学校有"连续失败锁定账号"的策略，
+    请在开始前确认风险，不要反复跑。
+    """
+    password = store.load()
+    if not password:
+        LOGGER.error("没有找到已保存的密码，请先运行：python login.py --setup")
+        return EXIT_USAGE
+    if not settings.has_account:
+        LOGGER.error("还没有配置账号，请先运行：python login.py --setup")
+        return EXIT_USAGE
+
+    portal_host, _ = drcom_portal.portal_address(settings.login_url, settings.portal_host)
+    local_ip = netcheck.guess_local_ip(portal_host)
+    login_url, _ = drcom_portal.autofill_client_ip(settings.login_url, local_ip)
+
+    probe = netcheck.probe_portal(login_url, timeout=8)
+    if probe.status == netcheck.STATUS_UNREACHABLE:
+        LOGGER.error("现在不在校园网环境（{0}），无法检测运营商。".format(probe.detail))
+        return EXIT_OK
+    if probe.status == netcheck.STATUS_ALREADY_ONLINE:
+        LOGGER.info(
+            "当前设备已经在线，没法再登录一次来试运营商。\n"
+            "请先注销校园网（或在另一台还没登录的设备上跑），再来检测。"
+        )
+        return EXIT_OK
+
+    # 先试当前配置里的那家（可能是对的），再试另外两家
+    order = []
+    if settings.operator:
+        order.append(settings.operator)
+    order += [name for name in drcom_portal.ISP_CHOICES if name != settings.operator]
+
+    LOGGER.warning(
+        "即将依次尝试 {0} 家运营商，最多产生 {0} 次认证请求。"
+        "如果学校有连续失败锁定策略，请谨慎使用。".format(len(order))
+    )
+
+    for index, name in enumerate(order, start=1):
+        suffix = drcom_portal.isp_suffix(name) or name
+        account_preview = drcom_portal.build_account(
+            settings.account, name, settings.account_prefix
+        )
+        LOGGER.info("[{0}/{1}] 试运营商：{2}（后缀 {3}，账号 {4}）".format(
+            index, len(order), name, suffix, account_preview))
+
+        trial = copy.deepcopy(settings)
+        trial.operator = name
+        result = login_with_http(trial, password, login_url, log=_log)
+
+        if result.ok:
+            LOGGER.info("")
+            LOGGER.info("=" * 46)
+            LOGGER.info("✅ 成功！这个账号属于：{0}".format(name))
+            LOGGER.info("=" * 46)
+            settings.operator = name
+            save_settings(settings)
+            LOGGER.info("已把配置里的运营商改成 {0}，以后直接 python login.py 就能自动登录。".format(name))
+            return EXIT_OK
+
+        LOGGER.info("    {0}".format(result.detail))
+
+    LOGGER.error("")
+    LOGGER.error("三家运营商都试过了，全部失败 —— 所以问题**不在运营商**，而在账号或密码本身：")
+    LOGGER.error("  1. 账号填的是学号还是手机号？和你在浏览器里登录时用的完全一致吗？")
+    LOGGER.error("  2. 账号前后有没有多余空格？密码有没有被中文输入法打成全角字符？")
+    LOGGER.error("  3. 密码里的字母大小写？")
+    LOGGER.error("  4. 用浏览器打开登录页手动登一次，确认这套账号密码本身能不能登上。")
+    LOGGER.error("  5. 如果手动能登、工具不能，请把日志发我：{0}".format(config_store.log_path()))
+    return EXIT_LOGIN_FAILED
+
+
 # --------------------------------------------------------------------------
 # 命令行
 # --------------------------------------------------------------------------
@@ -417,6 +538,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--probe", action="store_true", help="诊断：打印门户真实返回内容和运营商选项")
     parser.add_argument("--status", action="store_true", help="显示当前配置与校园网状态")
     parser.add_argument("--forget", action="store_true", help="删除已保存的密码")
+    parser.add_argument(
+        "--check-operator",
+        action="store_true",
+        help="依次试三家运营商，判断账号属于哪家（排查「账号密码没错却报错」）",
+    )
     parser.add_argument(
         "--engine", choices=("auto", "http", "selenium"),
         help="登录引擎：auto=先 HTTP 再退到 Selenium（默认）",
@@ -462,6 +588,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return command_status(settings, store)
     if args.forget:
         return command_forget(settings, store)
+    if args.check_operator:
+        return command_check_operator(settings, store)
 
     # ---- 需要交互的初始化 ----------------------------------------------
     # 开机自启（--quiet / --non-interactive）时绝不允许停在 input() 上等输入，

@@ -375,6 +375,24 @@ def looks_like_online_page(html: str) -> bool:
     return "name=\"logout\"" in html or "name='logout'" in html
 
 
+def describe_markers(html: str) -> str:
+    """把门户响应里的关键标记压成一行，方便写日志 / 排障。
+
+    例：``页面=Dr.COMWebLoginID_2.htm Msg=01 msga=''``
+
+    这些标记是判断"到底为什么失败"的唯一可靠依据，所以登录失败时一定要记下来。
+    """
+    page_match = re.search(r"<!--\s*(Dr\.COMWebLoginID_\d+\.htm)\s*-->", html or "")
+    code_match = re.search(r"\bMsg\s*=\s*'?(\d+)'?", html or "")
+    msg_match = re.search(r"\bmsga\s*=\s*'([^']*)'", html or "")
+
+    parts = ["页面={0}".format(page_match.group(1) if page_match else "未知")]
+    parts.append("Msg={0}".format(code_match.group(1) if code_match else "-"))
+    if msg_match:
+        parts.append("msga='{0}'".format(msg_match.group(1)))
+    return " ".join(parts)
+
+
 # --------------------------------------------------------------------------
 # 五、从真实页面里读出运营商下拉框（--probe 用，保证后缀不是我编的）
 # --------------------------------------------------------------------------

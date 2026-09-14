@@ -46,12 +46,30 @@ class TestOperatorChoice(CliTestBase):
     def test_name_and_suffix_choices(self):
         settings = Settings()
         self.assertEqual(login_mod._parse_operator_choice("中国移动", settings), "中国移动")
-        self.assertEqual(login_mod._parse_operator_choice("@cmcc", settings), "@cmcc")
+        # 后缀会规范成运营商名字，方便日志和配置统一
+        self.assertEqual(login_mod._parse_operator_choice("@cmcc", settings), "中国移动")
+        self.assertEqual(login_mod._parse_operator_choice("@telecom", settings), "中国电信")
+
+    def test_unknown_suffix_is_passed_through(self):
+        """学校若新增了别家运营商，直接写后缀也要能用。"""
+        settings = Settings()
+        self.assertEqual(login_mod._parse_operator_choice("@newisp", settings), "@newisp")
 
     def test_short_name_is_matched(self):
         settings = Settings()
         self.assertEqual(login_mod._parse_operator_choice("移动", settings), "中国移动")
         self.assertEqual(login_mod._parse_operator_choice("联通", settings), "中国联通")
+
+    def test_ambiguous_short_name_is_rejected_not_guessed(self):
+        """「中国」同时匹配三家，宁可报错也不能默默选成移动。"""
+        settings = Settings()
+        self.assertEqual(login_mod._parse_operator_choice("中国", settings), "")
+
+    def test_empty_choice_returns_empty(self):
+        """按回车（空输入）绝不能默默默认成中国移动 —— 这正是室友登录失败的常见原因。"""
+        settings = Settings()
+        self.assertEqual(login_mod._parse_operator_choice("", settings), "")
+        self.assertEqual(login_mod._parse_operator_choice("   ", settings), "")
 
     def test_invalid_choice_returns_empty(self):
         settings = Settings()
@@ -80,7 +98,8 @@ class TestParser(CliTestBase):
     def test_all_documented_flags_exist(self):
         parser = login_mod.build_parser()
         for flag in ("--setup", "--test", "--probe", "--status", "--forget",
-                     "--engine", "--config", "--wait", "--headless", "--verbose", "--quiet"):
+                     "--check-operator", "--engine", "--config", "--wait",
+                     "--headless", "--verbose", "--quiet", "--non-interactive"):
             self.assertIn(flag, parser.format_help(), "{0} 应该在帮助里".format(flag))
 
     def test_engine_only_accepts_known_values(self):
@@ -125,6 +144,40 @@ class TestParser(CliTestBase):
 
 
 class TestRunSetup(CliTestBase):
+    def test_pressing_enter_at_the_operator_prompt_does_not_default_to_mobile(self):
+        """回归测试：早期版本按回车会默认成「中国移动」，
+        于是电信/联通的同学默默用了错运营商，表现为「账号密码没错却登录失败」。"""
+        os.environ["CAMPUSNET_ACCOUNT"] = "2021012345"
+        os.environ["CAMPUSNET_PASSWORD"] = "p@ssw0rd"
+
+        settings = Settings()
+        settings.password_backend = "plain"
+
+        with mock.patch.object(login_mod, "run_login", return_value=login_mod.EXIT_OK):
+            with mock.patch("builtins.input", return_value=""):
+                code = login_mod.run_setup(
+                    settings, PasswordStore(settings), interactive=True
+                )
+
+        self.assertEqual(code, login_mod.EXIT_USAGE, "运营商没选定时不能保存配置")
+        self.assertFalse(config_store.config_exists())
+
+    def test_interactive_operator_prompt_accepts_an_explicit_choice(self):
+        os.environ["CAMPUSNET_ACCOUNT"] = "2021012345"
+        os.environ["CAMPUSNET_PASSWORD"] = "p@ssw0rd"
+
+        settings = Settings()
+        settings.password_backend = "plain"
+
+        with mock.patch.object(login_mod, "run_login", return_value=login_mod.EXIT_OK):
+            with mock.patch("builtins.input", return_value="3"):
+                code = login_mod.run_setup(
+                    settings, PasswordStore(settings), interactive=True
+                )
+
+        self.assertEqual(code, login_mod.EXIT_OK)
+        self.assertEqual(settings.operator, "中国电信", "选 3 应该是中国电信")
+
     def test_non_interactive_setup_from_env_saves_everything(self):
         os.environ["CAMPUSNET_ACCOUNT"] = "2021012345"
         os.environ["CAMPUSNET_OPERATOR"] = "中国移动"

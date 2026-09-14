@@ -102,7 +102,7 @@ InternetSignUpScript/
 ├── requirements-dev.txt      # 测试用依赖（pytest）
 ├── config.example.json       # 配置示例（真正配置不在这里）
 ├── .gitignore                # 防止账号密码等敏感信息被提交
-├── tests/                    # 测试：101 个用例，全部可离线运行
+├── tests/                    # 测试：109 个用例，全部可离线运行
 │   ├── mock_portal.py        #   一个假的 Dr.COM 门户（端到端集成测试用）
 │   └── test_*.py
 └── README.md
@@ -237,6 +237,7 @@ uninstall_autostart.bat
 | `python login.py --probe` | **诊断**：打印门户真实返回内容、运营商选项、接口地址 |
 | `python login.py --status` | 看当前配置（不含密码）和是否在校园网 |
 | `python login.py --forget` | 删除本机保存的密码 |
+| `python login.py --check-operator` | 依次试三家运营商，找出账号属于哪家（排查「账号密码没错却报错」） |
 | `python login.py --headless` | Selenium 无界面运行 |
 | `python login.py --wait 120` | 把等待网络的时间改成 120 秒 |
 | `python login.py --non-interactive` | 绝不停下来提问（没有配置就直接退出并记日志） |
@@ -398,7 +399,7 @@ python login.py --setup
 
 ## 12. 测试方法
 
-### 测试（101 个用例，全部离线可跑，不需要校园网）
+### 测试（109 个用例，全部离线可跑，不需要校园网）
 
 ```bat
 python -m unittest discover -s tests -v
@@ -412,7 +413,8 @@ python -m unittest discover -s tests -v
 | `test_config_store.py` | 配置读写往返、未知字段不丢、`to_public_dict()` 不泄露密码、plain 后端、**DPAPI 加解密往返（含中文）** |
 | `test_netcheck.py` | gb2312 解码、等网络、探测校园网、**超时一定会返回、绝不无限等待** |
 | `test_engine_http.py` | HTTP 引擎全部分支：密码错 / 成功 / 已在线 / 无法识别 / 门户不可达 / 提交失败；**密码明文永不进入日志** |
-| `test_integration_mock_portal.py` | **端到端**：在一个假 Dr.COM 门户（`tests/mock_portal.py`）上跑完整的 `login.py`，验证提交的字段与真实门户一致、三种运营商后缀正确、"已在线"时不重复提交、"不在校园网"时安静退出且退出码为 0 |
+| `test_integration_mock_portal.py` | **端到端**：在一个假 Dr.COM 门户（`tests/mock_portal.py`）上跑完整的 `login.py`，验证提交的字段与真实门户一致、三种运营商后缀正确、"已在线"时不重复提交、"不在校园网"时安静退出且退出码为 0、**`--check-operator` 能把配错的运营商自动找出来并写回配置** |
+| `test_login_cli.py` | 命令行解析、`--quiet/--non-interactive` 绝不停下来提问、**初始化向导不设运营商默认值**（按回车不会默默选成中国移动）、`.bat` 文件必须是纯 ASCII |
 
 ### 手动测试
 
@@ -577,10 +579,45 @@ git ls-files | findstr /i "config.json .log"
 2. **关掉 Clash / v2ray 等系统代理**。工具内部已经禁用代理，但如果代理改的是路由表/TUN 模式，仍会拦掉内网地址。
 3. 用 `python login.py --probe` 看具体错误。
 
-**Q：日志显示"账号或密码错误"，但我确定没输错。**
+**Q：日志显示「登录失败：账号或密码错误」，但我确定账号密码没输错。**
 
-- 运营商选错了。移动/联通/电信三种后缀不能混，用 `--setup` 重选。
-- 账号本身带了后缀（比如学号后面已经有 `@cmcc`）。本工具会自动拼接，不用你手填后缀。
+这是**最常见**的一个坑：三家运营商在校园网里是**各自独立的账号库**，
+账号后缀 `@cmcc` / `@unicom` / `@telecom` 就是用来指定去哪个库里查你的账号的。
+**选错运营商的表现，恰恰就是"账号密码明明没错，门户却报账号或密码错误"。**
+
+按顺序排查：
+
+1. **先确认运营商**（用你办宽带的那一家，不是手机号的那一家）：
+   重选：`python login.py --setup`
+2. **不知道该选哪家？** 让工具自动试：
+
+   ```bat
+   python login.py --check-operator
+   ```
+
+   它会依次用三家运营商各试一次，找到能登上的那家并**自动写回配置**。
+   ⚠️ 最多产生 3 次认证请求；如果学校有"连续失败锁定账号"的策略，请谨慎使用。
+   如果三家都不行，它会明确告诉你"问题不在运营商，而在账号或密码本身"。
+
+   判断依据可以从日志里看到，例如：
+
+   ```
+   门户原始标记：页面=Dr.COMWebLoginID_2.htm Msg=01 msga=''
+   [1/3] 试运营商：中国移动（后缀 @cmcc，账号 ,0,你的学号@cmcc）
+   [2/3] 试运营商：中国联通（后缀 @unicom，账号 ,0,你的学号@unicom）
+   [3/3] 试运营商：中国电信（后缀 @telecom，账号 ,0,你的学号@telecom）
+   ✅ 成功！这个账号属于：中国电信
+   ```
+
+3. 账号本身带了后缀（比如学号后面已经有 `@cmcc`）。本工具会自动拼接，不用你手填。
+4. 账号是学号还是手机号？和你在浏览器里登录时用的完全一致吗？前后有没有多余空格？
+5. 密码注意**大小写**和**全角/半角**（中文输入法很容易打出全角字符，看起来一样但不相等）。
+6. 先用浏览器打开登录页手动登一次。**手动能登、工具不能**的话，把日志发我：
+   `%LOCALAPPDATA%\CampusNetAutoLogin\login.log`
+
+> 📌 早期版本的初始化向导在"请选择运营商"处**默认值是 1（中国移动）**，
+> 只按回车就会默默选成移动 —— 电信/联通的同学就会遇到这个问题。
+> 现在已改成**必须明确选择**，直接回车会重新提问。
 
 **Q：`autofill_client_ip` 是干什么的？**
 

@@ -27,6 +27,7 @@ from drcom_portal import (
     build_login_endpoint,
     build_login_payload,
     classify_response,
+    describe_markers,
     looks_like_login_page,
     looks_like_online_page,
 )
@@ -101,6 +102,8 @@ def login_with_http(
         return LoginResult(False, "submit_failed", "提交认证请求失败：{0}".format(error))
 
     outcome: LoginOutcome = classify_response(body)
+    # 把门户的原始标记写进日志：排障时这是唯一可靠的依据
+    log("门户原始标记：{0}".format(describe_markers(body)))
     log("门户返回判定：{0} / {1}".format(outcome.status, outcome.message))
 
     if outcome.ok:
