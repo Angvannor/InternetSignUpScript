@@ -477,7 +477,10 @@ python 能拿到 200，git 却时而 `Connection was reset`、时而 `Could not 
 **OpenSSL 后端 + 正在运行的代理** —— 这样推就成功了：
 
 ```bat
-:: 1) 永久修掉 schannel 这个坑（推荐，一次性）
+:: 1) 修掉 schannel 这个坑
+::    本仓库的工作副本已经用「仅本仓库」的方式设好了：
+::        git config http.sslBackend openssl
+::    换新电脑 / 新克隆建议设成全局（影响所有仓库，一次性）：
 git config --global http.sslBackend openssl
 
 :: 2) 确认代理软件在运行（127.0.0.1:7897 真的在监听）
