@@ -14,26 +14,44 @@ import netcheck  # noqa: E402
 LOGIN_PAGE = "<!--Dr.COMWebLoginID_0.htm--><input name='upass'>"
 ONLINE_PAGE = '<!--Dr.COMWebLoginID_3.htm--><input name="logout" value="注销">'
 
+#: 门户保活端点在线时返回的内容（真实抓取的形状）
+KEEPALIVE_ONLINE = (
+    "<html><head><title>Logout</title>\n"
+    "s1=020;sec=12548;uf=146824;df=1570225;\n"
+    "url1='http://172.16.2.100:9002/0';url2='http://172.16.2.100/F.htm';\n"
+    "</head><body>注 销 Logout</body></html>"
+)
+
 
 class FakeClient:
-    """假的 HTTP 客户端：按脚本返回内容。"""
+    """假的 HTTP 客户端：按脚本返回内容。
 
-    def __init__(self, page, error=None):
+    pages 里可以按 URL 片段指定不同返回，用来同时模拟"登录页"和"保活端点"。
+    """
+
+    def __init__(self, page, error=None, pages=None):
         self.page = page
         self.error = error
+        self.pages = pages or {}
         self.calls = []
+
+    def _body_for(self, url):
+        for fragment, body in self.pages.items():
+            if fragment in url:
+                return body
+        return self.page
 
     def get(self, url):
         self.calls.append(("GET", url))
         if self.error:
             raise self.error
-        return 200, self.page, url
+        return 200, self._body_for(url), url
 
     def post(self, url, fields):
         self.calls.append(("POST", url))
         if self.error:
             raise self.error
-        return 200, self.page, url
+        return 200, self._body_for(url), url
 
 
 class TestDecode(unittest.TestCase):
@@ -99,8 +117,8 @@ class TestWaitForNetwork(unittest.TestCase):
 
 
 class TestProbePortal(unittest.TestCase):
-    def _probe_with(self, page, error=None):
-        client = FakeClient(page, error)
+    def _probe_with(self, page, error=None, pages=None):
+        client = FakeClient(page, error, pages)
         with mock.patch.object(netcheck, "PortalClient", return_value=client):
             return netcheck.probe_portal("http://172.16.2.100/a70.htm")
 
@@ -128,6 +146,61 @@ class TestProbePortal(unittest.TestCase):
         """能连上门户但内容认不出来时，宁可交给登录引擎试一次。"""
         result = self._probe_with("<html>???</html>")
         self.assertEqual(result.status, netcheck.STATUS_LOGIN_REQUIRED)
+
+
+class TestAlreadyOnlineDetection(unittest.TestCase):
+    """最重要的回归测试。
+
+    门户在"已经在线"时**照样显示登录页**，同时对再登录返回 Msg=01。
+    如果只看登录页，就会把"你本来还在线"误判成"账号或密码错误" ——
+    这条路径曾经把排查带偏了三轮。
+    """
+
+    def _probe(self, page, pages):
+        client = FakeClient(page, None, pages)
+        with mock.patch.object(netcheck, "PortalClient", return_value=client):
+            return netcheck.probe_portal("http://172.16.2.100/a70.htm"), client
+
+    def test_login_page_plus_online_keepalive_means_already_online(self):
+        result, client = self._probe(LOGIN_PAGE, {":9002": KEEPALIVE_ONLINE})
+        self.assertEqual(result.status, netcheck.STATUS_ALREADY_ONLINE)
+        self.assertIn("已经在线", result.detail)
+        self.assertIn("小时", result.detail)
+
+    def test_it_actually_asks_the_keepalive_endpoint(self):
+        _, client = self._probe(LOGIN_PAGE, {":9002": KEEPALIVE_ONLINE})
+        urls = [url for _method, url in client.calls]
+        self.assertTrue(any(":9002" in url for url in urls), "必须去问保活端点")
+
+    def test_offline_keepalive_keeps_login_required(self):
+        """保活端点说没在线（例如返回登录页/报错），就照常要求登录。"""
+        result, _ = self._probe(LOGIN_PAGE, {":9002": LOGIN_PAGE})
+        self.assertEqual(result.status, netcheck.STATUS_LOGIN_REQUIRED)
+
+    def test_keepalive_endpoint_down_does_not_break_the_probe(self):
+        """保活端点挂了不能影响主流程，更不能抛异常。"""
+        client = FakeClient(LOGIN_PAGE)
+        with mock.patch.object(netcheck, "PortalClient", return_value=client):
+            with mock.patch.object(
+                netcheck.PortalClient, "get",
+                side_effect=[(200, LOGIN_PAGE, "u"), OSError("connection refused")],
+            ):
+                result = netcheck.probe_portal("http://172.16.2.100/a70.htm")
+        self.assertEqual(result.status, netcheck.STATUS_LOGIN_REQUIRED)
+
+
+class TestCheckDeviceOnline(unittest.TestCase):
+    def test_returns_online_status_from_the_endpoint(self):
+        client = FakeClient(KEEPALIVE_ONLINE)
+        status = netcheck.check_device_online("http://172.16.2.100/a70.htm", client=client)
+        self.assertTrue(status.online)
+        self.assertEqual(status.seconds, 12548)
+
+    def test_unreachable_endpoint_is_not_online_and_never_raises(self):
+        client = FakeClient("", error=OSError("connection refused"))
+        status = netcheck.check_device_online("http://172.16.2.100/a70.htm", client=client)
+        self.assertFalse(status.online)
+        self.assertIn("不可达", status.detail)
 
 
 class TestWaitForCampus(unittest.TestCase):

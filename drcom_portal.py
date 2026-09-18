@@ -309,6 +309,19 @@ class LoginOutcome(NamedTuple):
         return self.status == "unknown"
 
 
+class OnlineStatus(NamedTuple):
+    """门户保活端点报告的"本机是否已经在线"。"""
+
+    online: bool
+    seconds: int = 0
+    up_bytes: int = 0
+    down_bytes: int = 0
+    detail: str = ""
+
+    def __bool__(self) -> bool:  # 允许 if status: 这种写法
+        return self.online
+
+
 #: Msg 代码 -> 说明。只写已确认的，不编造。
 MSG_HINTS = {
     "01": "账号或密码错误",
@@ -334,7 +347,15 @@ def classify_response(html: str) -> LoginOutcome:
     portal_msg = (msg_match.group(1) if msg_match else "").strip()
 
     if code == "01" and not portal_msg:
-        return LoginOutcome("bad_credentials", False, code, MSG_HINTS["01"])
+        # 重要：这个码是**有歧义**的 —— 门户对下面几种情况返回的是同一个 Msg=01：
+        #   ① 账号或密码错误   ② 运营商选错（等于在别的账号库里查）  ③ 该账号/设备已经在线
+        # 所以这里不能写死成"账号密码错误"，否则会把人误导到错误的方向。
+        # 真正判断"是不是已经在线"要用 parse_online_status() 读保活端点。
+        return LoginOutcome(
+            "bad_credentials", False, code,
+            "门户拒绝了这次登录（Msg=01）。这个码有歧义，可能是："
+            "①账号或密码错误 ②运营商选错 ③**这个账号/设备已经在线**",
+        )
 
     if code and code != "00":
         hint = MSG_HINTS.get(code, "门户返回错误码 Msg={0}".format(code))
@@ -434,7 +455,88 @@ def ac_reported_client_ip(html: str) -> Optional[str]:
 
 
 # --------------------------------------------------------------------------
-# 六、账号 / 密码的"形状"自检（只描述形状，绝不泄露内容）
+# 六、判断"这台设备现在是不是已经在线"
+# --------------------------------------------------------------------------
+#
+# 门户自己提供了一个保活/状态端点，就在 a41.js 的 startKeepAlive() 里：
+#     var url = window.location.protocol + "//" + window.location.hostname + ":9002";
+# 在线时它会返回一个标题为 Logout 的页面（真实抓取内容）：
+#
+#     <html><head><title>Logout</title>
+#     s1=020;sec=12548;uf=146824;df=1570225;
+#     url1='http://172.16.2.100:9002/0';url2='http://172.16.2.100/F.htm';s2=0;
+#     ... 注 销 Logout
+#
+#   sec = 已在线秒数，uf = 上行字节，df = 下行字节，url2 = 注销地址。
+#
+# 为什么这个判断非常关键：
+#   门户对"账号密码错误"和"这个账号/设备已经在线"**返回同一个 Msg=01**。
+#   不先用这个端点确认，就会把"你本来就还在线"误报成"账号或密码错误" ——
+#   这会把人误导到完全错误的方向上去查。
+
+KEEPALIVE_PORT = 9002
+
+_LOGOUT_TITLE_RE = re.compile(r"<title>\s*Logout\s*</title>", re.IGNORECASE)
+
+
+def build_keepalive_url(login_url: str, port: int = KEEPALIVE_PORT) -> str:
+    """拼出门户的保活/在线状态端点，例如 http://172.16.2.100:9002"""
+    parts = urlparse(login_url)
+    return "{0}://{1}:{2}".format(
+        parts.scheme or "http", parts.hostname or DEFAULT_PORTAL_HOST, port
+    )
+
+
+def format_duration(seconds: int) -> str:
+    """"12548 秒" -> "3 小时 29 分"。"""
+    hours, remainder = divmod(int(seconds), 3600)
+    minutes = remainder // 60
+    if hours:
+        return "{0} 小时 {1} 分".format(hours, minutes)
+    if minutes:
+        return "{0} 分钟".format(minutes)
+    return "{0} 秒".format(int(seconds))
+
+
+def format_bytes(size: int) -> str:
+    for unit, divisor in (("GB", 1024 ** 3), ("MB", 1024 ** 2), ("KB", 1024)):
+        if size >= divisor:
+            return "{0:.1f} {1}".format(size / divisor, unit)
+    return "{0} B".format(int(size))
+
+
+def parse_online_status(html: str) -> "OnlineStatus":
+    """解析保活端点返回的内容，判断本机当前是否已经在线。
+
+    只有确实长得像那个 Logout 状态页才算在线 —— 宁可判成"不知道"，
+    也不能靠猜，否则会出现"以为在线其实没在线"的假成功。
+    """
+    if not html:
+        return OnlineStatus(False, detail="保活端点没有返回内容")
+
+    if not (_LOGOUT_TITLE_RE.search(html) or ("url1=" in html and "sec=" in html)):
+        return OnlineStatus(False, detail="返回内容不是在线状态页")
+
+    def number(key: str) -> int:
+        match = re.search(r"\b{0}\s*=\s*(\d+)".format(key), html)
+        return int(match.group(1)) if match else 0
+
+    seconds = number("sec")
+    up_bytes = number("uf")
+    down_bytes = number("df")
+    return OnlineStatus(
+        online=True,
+        seconds=seconds,
+        up_bytes=up_bytes,
+        down_bytes=down_bytes,
+        detail="已在线 {0}，上行 {1}，下行 {2}".format(
+            format_duration(seconds), format_bytes(up_bytes), format_bytes(down_bytes)
+        ),
+    )
+
+
+# --------------------------------------------------------------------------
+# 七、账号 / 密码的"形状"自检（只描述形状，绝不泄露内容）
 # --------------------------------------------------------------------------
 
 #: 中国大陆手机号

@@ -20,6 +20,8 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import login as login_mod  # noqa: E402
+import drcom_portal  # noqa: E402
+import netcheck  # noqa: E402
 from tests.mock_portal import EXPECTED_FIELDS, MockPortal  # noqa: E402
 
 ACCOUNT = "2021012345"
@@ -34,6 +36,17 @@ class MockPortalIntegrationTest(unittest.TestCase):
         self._old_env = os.environ.get("CAMPUSNET_CONFIG_DIR")
         os.environ["CAMPUSNET_CONFIG_DIR"] = self.tmp
         self.config_file = os.path.join(self.tmp, "config.json")
+
+        # 假门户没有实现 :9002 保活端点。真去连 127.0.0.1:9002 在 Windows 上
+        # 被拒绝也要花掉约 2 秒，会让整个测试套件变得很慢，所以这里显式打桩：
+        # 默认"没在线"，需要测它的用例再单独覆盖。
+        # "保活端点说在线"的行为由 tests/test_netcheck.py 里的单元测试覆盖。
+        self.check_online = mock.patch.object(
+            netcheck, "check_device_online",
+            return_value=drcom_portal.OnlineStatus(False, detail="测试环境未实现在线端点"),
+        )
+        self.check_online.start()
+        self.addCleanup(self.check_online.stop)
 
     def tearDown(self):
         if self._old_env is None:
@@ -186,6 +199,34 @@ class TestCheckOperator(MockPortalIntegrationTest):
             self.write_config(portal, password_plain="")
             argv = ["--check-operator", "--quiet", "--config", self.config_file]
             self.assertEqual(login_mod.main(argv), login_mod.EXIT_USAGE)
+
+
+class TestAlreadyOnlineSkipsLogin(MockPortalIntegrationTest):
+    """门户保活端点说"已经在线"时，整条流程必须直接收工，绝不重复提交认证。
+
+    真实事故：机器本来就还在线，工具却因为门户返回 Msg=01 而报"账号或密码错误"，
+    把排查方向带偏了好几天。
+    """
+
+    def test_online_device_does_not_post_credentials(self):
+        self.check_online.stop()
+        self.addCleanup(self.check_online.start)
+        mock.patch.object(
+            netcheck, "check_device_online",
+            return_value=drcom_portal.OnlineStatus(
+                True, seconds=12548, up_bytes=146824, down_bytes=1570225,
+                detail="已在线 3 小时 29 分",
+            ),
+        ).start()
+        self.addCleanup(mock.patch.stopall)
+
+        with MockPortal(COMPOSITE_ACCOUNT, PASSWORD) as portal:
+            self.write_config(portal)
+            code = self.run_cli()
+
+            self.assertEqual(code, login_mod.EXIT_OK)
+            self.assertEqual(portal.post_requests(), [], "已在线时不应该提交任何认证请求")
+            self.assertFalse(portal.logged_in)
 
 
 class TestNotOnCampus(MockPortalIntegrationTest):

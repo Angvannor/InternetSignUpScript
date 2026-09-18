@@ -28,14 +28,9 @@ import logging
 import logging.handlers
 import os
 import sys
+import time
+import traceback
 from typing import Callable, List, Optional
-
-import config_store
-import drcom_portal
-import netcheck
-from config_store import PasswordStore, Settings, load_settings, save_settings
-from engine_http import LoginResult, login_with_http
-from engine_selenium import SeleniumUnavailable, login_with_selenium
 
 EXIT_OK = 0
 EXIT_LOGIN_FAILED = 1
@@ -44,6 +39,53 @@ EXIT_USAGE = 2
 LOGGER = logging.getLogger("campusnet")
 
 BANNER = "=" * 46
+
+
+# --------------------------------------------------------------------------
+# 崩溃兜底
+# --------------------------------------------------------------------------
+#
+# 开机自启走的是 start.bat -> pythonw.exe（没有控制台）。
+# pythonw 会把 stderr 直接丢掉，所以一旦在导入模块或 main() 里抛异常，
+# 表现就是"脚本好像没跑"，什么线索都没有（这次就是这么丢了 09-18 那次开机）。
+# 因此这里自己把异常写进文件。
+
+def _crash_log_path():
+    from pathlib import Path
+
+    base = os.environ.get("CAMPUSNET_CONFIG_DIR")
+    if base:
+        return Path(base) / "crash.log"
+    local = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+    if local:
+        return Path(local) / "CampusNetAutoLogin" / "crash.log"
+    return Path.home() / ".campusnetautologin" / "crash.log"
+
+
+def _write_crash_log(text: str) -> None:
+    """把崩溃信息追加到 crash.log；本身绝不能抛异常。"""
+    try:
+        path = _crash_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write("\n===== {0} =====\n{1}\n".format(stamp, text))
+    except Exception:
+        pass
+
+
+try:
+    import config_store
+    import drcom_portal
+    import netcheck
+    from config_store import PasswordStore, Settings, load_settings, save_settings
+    from engine_http import LoginResult, login_with_http
+    from engine_selenium import SeleniumUnavailable, login_with_selenium
+except BaseException:  # pragma: no cover - 只在文件损坏/不完整时触发
+    _write_crash_log(
+        "导入模块失败（项目文件可能不完整或被占用）：\n{0}".format(traceback.format_exc())
+    )
+    raise
 
 
 # --------------------------------------------------------------------------
@@ -423,6 +465,121 @@ def run_login(
 
 
 # --------------------------------------------------------------------------
+# 常驻监视模式（解决"睡醒/息屏后掉线要手动重登"）
+# --------------------------------------------------------------------------
+
+#: 监视循环里每一轮的状态
+WATCH_ONLINE = "online"          # 已经在线
+WATCH_LOGGED_IN = "logged_in"    # 刚刚登录成功
+WATCH_FAILED = "failed"          # 在校园网里但登录失败
+WATCH_NOT_CAMPUS = "not_campus"  # 不在校园网（在家 / 网卡没连上）
+WATCH_NO_PASSWORD = "no_password"
+
+
+def watch_tick(
+    settings: Settings,
+    store: PasswordStore,
+    engine_override: Optional[str] = None,
+) -> "tuple":
+    """监视循环的一轮：探一次门户，需要登录就登录。
+
+    刻意做得很轻：只发一个 GET 探测（不像 run_login 那样有 60 秒等待），
+    这样每 30 秒跑一次也不会有负担。
+
+    返回 (状态, 说明)。
+    """
+    portal_host, _ = drcom_portal.portal_address(settings.login_url, settings.portal_host)
+    local_ip = netcheck.guess_local_ip(portal_host)
+    login_url = settings.login_url
+    if settings.autofill_client_ip and local_ip:
+        login_url, _ = drcom_portal.autofill_client_ip(login_url, local_ip)
+
+    probe = netcheck.probe_portal(login_url, timeout=6)
+
+    if probe.status == netcheck.STATUS_UNREACHABLE:
+        return WATCH_NOT_CAMPUS, probe.detail
+    if probe.status == netcheck.STATUS_ALREADY_ONLINE:
+        return WATCH_ONLINE, probe.detail
+
+    # 睡眠唤醒、AC 空闲踢下线之后，这里会走到"要求登录"分支，于是自动重登
+    if settings.autofill_client_ip:
+        ac_ip = drcom_portal.ac_reported_client_ip(probe.html)
+        if ac_ip:
+            login_url, _ = drcom_portal.autofill_client_ip(login_url, ac_ip)
+
+    password = store.load()
+    if not password:
+        return WATCH_NO_PASSWORD, "没有已保存的密码（请运行 python login.py --setup）"
+
+    engine = _resolve_engine(settings, engine_override)
+    result = _try_engines(settings, password, login_url, engine)
+    if result.ok:
+        return WATCH_LOGGED_IN, result.detail
+    return WATCH_FAILED, result.detail
+
+
+def run_watch(
+    settings: Settings,
+    store: PasswordStore,
+    engine_override: Optional[str] = None,
+    interval: float = 30.0,
+    online_interval: Optional[float] = None,
+    max_rounds: Optional[int] = None,
+    sleep: Callable[[float], None] = time.sleep,
+    tick: Optional[Callable[..., "tuple"]] = None,
+) -> int:
+    """常驻监视：隔一段时间探一次，掉线就自动重新登录。
+
+    这是"息屏/睡眠后网络断开"的正解 —— Windows 的启动文件夹只在登录时跑一次，
+    睡醒、锁屏解锁、AC 空闲踢人它都管不到；常驻进程天然覆盖这些情况。
+
+    参数 sleep / tick / max_rounds 是为了能被单元测试注入，
+    正常运行不用管。
+    """
+    tick = tick or watch_tick
+    online_interval = online_interval if online_interval is not None else max(interval * 10, 300.0)
+
+    LOGGER.info("进入常驻监视模式：掉线/睡醒后会自动重新登录。")
+    LOGGER.info("  探测间隔：不在线时 {0:.0f} 秒，在线时 {1:.0f} 秒".format(interval, online_interval))
+    LOGGER.info("  按 Ctrl+C 结束。")
+
+    previous = None
+    rounds = 0
+    try:
+        while True:
+            rounds += 1
+            try:
+                state, detail = tick(settings, store, engine_override)
+            except Exception:
+                state, detail = WATCH_FAILED, "本轮异常"
+                LOGGER.error("监视轮次异常（已忽略，继续监视）：\n{0}".format(traceback.format_exc()))
+
+            if state != previous:
+                if state == WATCH_LOGGED_IN:
+                    LOGGER.info("✅ 已自动重新登录：{0}".format(detail))
+                elif state == WATCH_ONLINE:
+                    LOGGER.info("当前已在线，继续监视。")
+                elif state == WATCH_NOT_CAMPUS:
+                    LOGGER.info("不在校园网环境（{0}），继续等待。".format(detail))
+                elif state == WATCH_NO_PASSWORD:
+                    LOGGER.error("没有可用的密码：{0}".format(detail))
+                else:
+                    LOGGER.warning("在校园网里但登录失败：{0}".format(detail))
+                previous = state
+            elif state == WATCH_FAILED and rounds % 10 == 0:
+                # 一直失败也要偶尔提醒，不然日志会太吵
+                LOGGER.warning("仍在失败中：{0}".format(detail))
+
+            if max_rounds is not None and rounds >= max_rounds:
+                return EXIT_OK
+
+            sleep(online_interval if state == WATCH_ONLINE else interval)
+    except KeyboardInterrupt:
+        LOGGER.info("监视已停止。")
+        return EXIT_OK
+
+
+# --------------------------------------------------------------------------
 # 辅助命令
 # --------------------------------------------------------------------------
 
@@ -632,6 +789,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="指定配置文件路径（默认 %%LOCALAPPDATA%%\\CampusNetAutoLogin\\config.json）",
     )
     parser.add_argument("--wait", type=int, help="等待网络/校园网的秒数")
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="常驻监视：掉线/睡醒后自动重新登录（解决息屏休眠后掉线的问题）",
+    )
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=30.0,
+        help="监视模式下不在线时的探测间隔秒数（默认 30，在线时自动放大到 5 分钟）",
+    )
+    parser.add_argument(
+        "--online-interval",
+        type=float,
+        default=None,
+        help="监视模式下已经在线时的探测间隔秒数（默认 300，即 5 分钟）",
+    )
+    parser.add_argument(
+        "--max-rounds",
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,  # 仅供测试：跑够 N 轮就退出
+    )
     parser.add_argument("--headless", action="store_true", help="Selenium 无界面运行 Edge")
     parser.add_argument("--verbose", action="store_true", help="输出调试日志")
     parser.add_argument("--quiet", action="store_true", help="不往控制台输出（只写日志文件），开机自启时用")
@@ -646,6 +826,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     setup_logging(verbose=args.verbose, quiet=args.quiet)
+
+    # 每次启动都留一条心跳。开机自启是没窗口的，出了事只能靠日志判断
+    # "到底跑没跑起来"。有这一行就不会再出现"什么记录都没有"的情况。
+    _log("启动：pid={0} 参数={1}".format(os.getpid(), " ".join(argv or sys.argv[1:]) or "(无)"))
 
     config_file = None
     if args.config:
@@ -691,6 +875,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             return EXIT_USAGE
         return run_setup(settings, store, interactive=interactive, engine_override=args.engine)
 
+    # ---- 常驻监视模式 ---------------------------------------------------
+    if args.watch:
+        return run_watch(
+            settings, store,
+            engine_override=args.engine,
+            interval=args.interval,
+            online_interval=args.online_interval,
+            max_rounds=args.max_rounds,
+        )
+
     # ---- 正常登录 -------------------------------------------------------
     if args.test:
         LOGGER.info("== 手动测试模式 ==")
@@ -703,4 +897,11 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except BaseException:
+        # pythonw 会吞掉 stderr，所以自己落盘
+        _write_crash_log("main() 未捕获异常：\n{0}".format(traceback.format_exc()))
+        raise

@@ -69,5 +69,18 @@ echo         (tick "Add python.exe to PATH" during installation)
 exit /b 2
 
 :found
+set "LOGDIR=%LOCALAPPDATA%\CampusNetAutoLogin"
+if not exist "%LOGDIR%" mkdir "%LOGDIR%" >nul 2>nul
+
+rem ---- pre-flight: make sure every module imports --------------------------
+rem pythonw.exe has NO console and throws stderr away, so a syntax error in any
+rem .py file looks exactly like "the script never ran" (that is how the
+rem 2026-09-18 boot was lost: engine_http.py had a stray "py" on line 1).
+"%PYEXE%" %PYARGS% "%HERE%tools\preflight.py" >"%LOGDIR%\preflight.log" 2>&1
+if errorlevel 1 (
+    >>"%LOGDIR%\start_error.log" echo [%date% %time%] preflight failed - see preflight.log
+    exit /b 3
+)
+
 "%PYEXE%" %PYARGS% "%HERE%login.py" --quiet --non-interactive %*
 exit /b %ERRORLEVEL%

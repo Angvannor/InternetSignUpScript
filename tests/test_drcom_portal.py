@@ -63,6 +63,25 @@ REAL_LOGIN_URL = (
     "&mac=00-00-00-00-00-00"
 )
 
+# --- 真实抓取内容：门户的保活端点 http://172.16.2.100:9002 ----------------
+# 在线时它返回这个 Logout 状态页（sec/uf/df 就是真实的用量统计）。
+REAL_KEEPALIVE_PAGE = """<html><head><title>Logout</title>
+\t<SCRIPT language=javascript>
+s1=020;sec=12548;uf=146824;df=1570225;
+url1='http://172.16.2.100:9002/0'            ;url2='http://172.16.2.100/F.htm'   ;
+s2=0;
+function ee(){if(s2!=1){window.open(url1,'','width=280,height=38,left=0,top=0,resizable=1');window.close();}}
+function wc(){if(window.confirm("Closing the window means ending the link.")){s2=1;window.open(url2);window.close()}}
+</SCRIPT>
+</head>
+<body onunload="ee()" bgcolor="#EFF9FE">
+<div align=center>
+<table><p></p>
+<tr><td height=30><div align=center>
+<a href=javascript:wc() style="text-decoration: none"><font color="#5F6468"style="font-size: 9pt;">注  销 Logout</font></a></div></td></tr>
+</body></html>
+"""
+
 
 class TestOperatorSuffix(unittest.TestCase):
     def test_known_operators(self):
@@ -350,6 +369,58 @@ class TestDescribeMarkers(unittest.TestCase):
 
     def test_handles_empty_input(self):
         self.assertIn("未知", portal.describe_markers(""))
+
+
+class TestMsg01IsAmbiguous(unittest.TestCase):
+    """门户对"密码错"和"已经在线"返回同一个 Msg=01，判定说明必须如实反映这一点。
+
+    这一条是被真实事故逼出来的：机器其实还在线，工具却报"账号或密码错误"，
+    结果排查方向被带偏了三轮。
+    """
+
+    def test_message_mentions_already_online(self):
+        outcome = portal.classify_response(REAL_FAILURE_PAGE)
+        self.assertEqual(outcome.status, "bad_credentials")
+        self.assertIn("已经在线", outcome.message)
+        self.assertIn("运营商", outcome.message)
+
+
+class TestOnlineStatus(unittest.TestCase):
+    """门户的保活端点 http://<host>:9002 —— 在线时返回 Logout 状态页。"""
+
+    def test_parses_the_real_keepalive_page(self):
+        status = portal.parse_online_status(REAL_KEEPALIVE_PAGE)
+        self.assertTrue(status.online)
+        self.assertTrue(status)  # __bool__
+        self.assertEqual(status.seconds, 12548)
+        self.assertEqual(status.up_bytes, 146824)
+        self.assertEqual(status.down_bytes, 1570225)
+        self.assertIn("3 小时 29 分", status.detail)
+        self.assertIn("下行", status.detail)
+
+    def test_login_page_is_not_online(self):
+        self.assertFalse(portal.parse_online_status(REAL_LOGIN_PAGE).online)
+
+    def test_failure_page_is_not_online(self):
+        self.assertFalse(portal.parse_online_status(REAL_FAILURE_PAGE).online)
+
+    def test_empty_and_garbage_are_not_online(self):
+        self.assertFalse(portal.parse_online_status("").online)
+        self.assertFalse(portal.parse_online_status("<html>hi</html>").online)
+        self.assertFalse(portal.parse_online_status(None).online)
+
+    def test_keepalive_url(self):
+        self.assertEqual(
+            portal.build_keepalive_url(REAL_LOGIN_URL), "http://172.16.2.100:9002"
+        )
+
+    def test_format_helpers(self):
+        self.assertEqual(portal.format_duration(12548), "3 小时 29 分")
+        self.assertEqual(portal.format_duration(90), "1 分钟")
+        self.assertEqual(portal.format_duration(45), "45 秒")
+        self.assertEqual(portal.format_bytes(1570225), "1.5 MB")
+        self.assertEqual(portal.format_bytes(2048), "2.0 KB")
+        self.assertEqual(portal.format_bytes(512), "512 B")
 
 
 if __name__ == "__main__":

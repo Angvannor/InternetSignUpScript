@@ -22,6 +22,7 @@ import urllib.request
 from http.cookiejar import CookieJar
 from typing import Callable, Dict, NamedTuple, Optional, Tuple
 
+import drcom_portal
 from drcom_portal import looks_like_login_page, looks_like_online_page
 
 #: 探测结果状态
@@ -170,6 +171,27 @@ def wait_for_network(
 # 校园网探测
 # --------------------------------------------------------------------------
 
+def check_device_online(login_url: str, timeout: float = 3.0, client=None) -> "drcom_portal.OnlineStatus":
+    """用门户**自己的**保活端点判断这台设备当前是不是已经在线。
+
+    对应的就是 a41.js 里 startKeepAlive() 访问的 http://<host>:9002。
+    这个判断必须做，因为门户对"账号密码错误"和"已经在线"返回同一个 Msg=01。
+
+    超时刻意给得比较短（3 秒）：这个端点只是"锦上添花"，
+    万一学校把它封了，绝不能让整体探测被它拖住。
+
+    端点不可达/返回异常时一律当作"不知道（没在线）"，绝不抛异常。
+    """
+    url = drcom_portal.build_keepalive_url(login_url)
+    if client is None:
+        client = PortalClient(timeout=timeout)
+    try:
+        _, text, _ = client.get(url)
+    except Exception as error:
+        return drcom_portal.OnlineStatus(False, detail="保活端点不可达（{0}）".format(error))
+    return drcom_portal.parse_online_status(text)
+
+
 def probe_portal(login_url: str, timeout: float = 8.0) -> ProbeResult:
     """访问校园网认证地址，判断当前环境。"""
     client = PortalClient(timeout=timeout)
@@ -186,6 +208,18 @@ def probe_portal(login_url: str, timeout: float = 8.0) -> ProbeResult:
 
     if looks_like_online_page(text):
         return ProbeResult(STATUS_ALREADY_ONLINE, "认证页面显示当前设备已经在线", text, final_url)
+
+    # 登录页在"已经在线"的时候也会照样显示，所以还要问一下门户的保活端点。
+    # 这一步能避免把"你本来就还在线"误报成"账号或密码错误"。
+    # 用独立的短超时客户端：这个端点万一被封，也不能拖慢主探测。
+    status = check_device_online(login_url, timeout=min(3.0, timeout))
+    if status.online:
+        return ProbeResult(
+            STATUS_ALREADY_ONLINE,
+            "门户保活端点显示本机已经在线（{0}）".format(status.detail),
+            text,
+            final_url,
+        )
 
     if looks_like_login_page(text):
         return ProbeResult(STATUS_LOGIN_REQUIRED, "认证页面要求输入账号密码", text, final_url)

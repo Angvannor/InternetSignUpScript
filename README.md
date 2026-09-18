@@ -17,6 +17,7 @@
 - [5. 第一次配置](#5-第一次配置)
 - [6. 设置开机自启](#6-设置开机自启)
 - [7. 常用命令](#7-常用命令)
+- [7.5 息屏 / 睡眠后掉线怎么办](#75-息屏--睡眠后掉线怎么办)
 - [8. 它是怎么工作的（真实门户逆向结论）](#8-它是怎么工作的真实门户逆向结论)
 - [9. 配置项说明](#9-配置项说明)
 - [10. 密码是怎么保存的](#10-密码是怎么保存的)
@@ -93,16 +94,18 @@ InternetSignUpScript/
 ├── engine_selenium.py        # Selenium 4 + Edge 登录引擎
 ├── config_store.py           # 配置读写 + 密码安全保存（keyring / DPAPI）
 ├── start.bat                 # 开机启动入口（自动找 Python，不假设它在 PATH 里）
+├── start_watch.bat           # 常驻监视入口（睡醒/掉线后自动重新登录）
 ├── start_debug.bat           # 调试用（保留窗口，能看到全部输出）
 ├── install_autostart.bat     # 一键把 start.bat 放进"启动"文件夹
 ├── uninstall_autostart.bat   # 取消开机自启
 ├── push_to_git.bat           # 一键 git add/commit/push（会用提示问远程仓库地址）
 ├── tools/autostart.ps1       # install/uninstall_autostart.bat 真正干活的脚本
+├── tools/preflight.py        # 启动前自检：保证「脚本没跑」能被查出来
 ├── requirements.txt          # 第三方依赖（全部可选）
 ├── requirements-dev.txt      # 测试用依赖（pytest）
 ├── config.example.json       # 配置示例（真正配置不在这里）
 ├── .gitignore                # 防止账号密码等敏感信息被提交
-├── tests/                    # 测试：131 个用例，全部可离线运行
+├── tests/                    # 测试：169 个用例，全部可离线运行
 │   ├── mock_portal.py        #   一个假的 Dr.COM 门户（端到端集成测试用）
 │   └── test_*.py
 └── README.md
@@ -258,16 +261,69 @@ uninstall_autostart.bat
 | `python login.py --probe` | **诊断**：打印门户真实返回内容、运营商选项、接口地址 |
 | `python login.py --status` | 看当前配置（不含密码）和是否在校园网 |
 | `python login.py --forget` | 删除本机保存的密码 |
+| `python login.py --watch` | **常驻监视**：掉线/睡醒后自动重新登录（见 7.5 节） |
+| `python login.py --watch --interval 15` | 监视模式下不在线时每 15 秒探一次（默认 30） |
+| `python login.py --watch --online-interval 120` | 已在线时每 120 秒探一次（默认 300） |
 | `python login.py --check-operator` | 依次试三家运营商，找出账号属于哪家（排查「账号密码没错却报错」） |
 | `python login.py --headless` | Selenium 无界面运行 |
 | `python login.py --wait 120` | 把等待网络的时间改成 120 秒 |
 | `python login.py --non-interactive` | 绝不停下来提问（没有配置就直接退出并记日志） |
+| `start_watch.bat` | 双击即进入常驻监视模式（无窗口运行） |
 | `start_debug.bat` | 双击即 `--verbose` 并保留窗口，最适合排错 |
 | `start_debug.bat --probe` | 同上，但只做诊断、绝不登录 |
 | `python -m unittest discover -s tests` | 跑全部测试 |
+| `install_autostart.bat watch` | 把开机自启改成启动**监视器**（推荐，见 7.5 节） |
+| `python tools/preflight.py` | 手动跑一次启动前自检 |
 | `push_to_git.bat` | 提交并推送到 Git 远程仓库 |
 
 **退出码**：`0` = 成功 / 本来就在线 / 不在校园网（都算正常）；`1` = 尝试登录但失败；`2` = 配置或用法错误。
+
+---
+
+## 7.5 息屏 / 睡眠后掉线怎么办
+
+**这是校园网 + Windows 睡眠的固有组合**：电脑睡着的时候没有任何流量，
+认证设备（AC）会把会话回收；睡醒之后需要重新认证一次。
+
+而 **Windows 的"启动"文件夹只在"登录"时跑一次** —— 睡醒、锁屏解锁、
+AC 空闲踢人这些情况它一次都管不到。所以只靠 `start.bat` 必然要手动重登。
+
+### 解决办法：常驻监视模式
+
+```bat
+python login.py --watch
+```
+
+它会隔一段时间探一次门户：
+
+| 探测结果 | 工具的动作 |
+|---|---|
+| 已经在线 | 什么都不做（**不会**重复提交认证） |
+| 要求登录 | **自动重新登录** ← 睡醒后掉线走的就是这条 |
+| 不在校园网 | 安静等待，不报错、不弹窗、不退出 |
+
+探测间隔默认"不在线 30 秒 / 在线 5 分钟"，可以调：
+
+```bat
+python login.py --watch --interval 15 --online-interval 120
+```
+
+### 让监视器开机自启
+
+```bat
+install_autostart.bat watch
+```
+
+它只是把 `start_watch.bat` 的快捷方式放进"启动"文件夹 ——
+**仍然不碰注册表、不装服务**（需求文档第十五条）。
+想换回一次性登录：`install_autostart.bat`（不带参数）。
+
+### 另一种做法：用任务计划在"睡醒"时触发
+
+如果你不想让电脑上常驻一个进程，也可以用任务计划程序加一个
+"从睡眠唤醒"触发器（`Microsoft-Windows-Power-Troubleshooter` 事件 ID 1）。
+这是 Windows 自带机制、也不改注册表，只是配置起来比 `--watch` 麻烦一点。
+两种方式都行，`--watch` 更简单、覆盖的场景也更多（它连"AC 空闲踢人"都能补上）。
 
 ---
 
@@ -340,13 +396,50 @@ document.f0.submit();
 ,0,你的学号@telecom     （中国电信）
 ```
 
-**登录结果判定**（用一次假账号实测复核过）：
+### 登录结果判定（有一个非常重要的坑）
 
-| 门户返回的页面标记 | 含义 |
+| 门户返回 | 含义 |
 |---|---|
-| `<!--Dr.COMWebLoginID_3.htm-->` | ✅ 登录成功 / 已在线 |
-| `<!--Dr.COMWebLoginID_2.htm-->` 且 `Msg=01;` `msga='';` | ❌ 账号或密码错误 |
+| `<!--Dr.COMWebLoginID_3.htm-->` | ✅ 登录成功 |
 | `<!--Dr.COMWebLoginID_0.htm-->` | 登录页，需要（重新）登录 |
+| `Msg=01;` `msga='';` | ⚠️ **有歧义**，见下 |
+
+**这个坑害人不浅**：门户对下面三种完全不同的情况返回的是**同一个 `Msg=01`**：
+
+1. 账号或密码错误
+2. 运营商选错（等于拿着账号去别家的库里查）
+3. **这个账号 / 这台设备已经在线**
+
+而且**已经在线的时候，门户照样显示登录页**。所以只看登录页 + `Msg=01`，
+就会把"你本来就还在线"误报成"账号或密码错误"，把人引到完全错误的方向去查。
+
+### 所以我们去问门户自己的保活端点
+
+门户的 `a41.js` 里有个 `startKeepAlive()`，访问的是：
+
+```
+http://172.16.2.100:9002
+```
+
+在线时它返回一个标题是 `Logout` 的状态页（真实抓取内容）：
+
+```
+<html><head><title>Logout</title>
+s1=020;sec=12548;uf=146824;df=1570225;
+url1='http://172.16.2.100:9002/0';url2='http://172.16.2.100/F.htm';
+```
+
+`sec` = 已在线秒数，`uf` / `df` = 上行 / 下行字节。
+工具据此判定"本机已经在线"，**直接收工、不再提交认证**，日志长这样：
+
+```
+已在校园网环境：门户保活端点显示本机已经在线（已在线 3 小时 32 分，上行 181.5 KB，下行 1.5 MB）
+当前设备已经在线，无需登录。
+```
+
+这个判断只在"确实长得像那个 Logout 状态页"时才成立，判不准就当作"没在线"，
+绝不靠猜 —— 否则会出现"以为在线其实没在线"的假成功。
+万一学校把 9002 端口封了，这个检查会 3 秒超时并自动跳过，不影响主流程。
 
 因为门户把界面放在 JS 里，所以 `--probe` 读 `a70.htm` 时看不到 `<select>`，
 它会自动改用本文件里记录的**真实选项映射**，并提示你去 `pc.js` 复核。
@@ -420,7 +513,7 @@ python login.py --setup
 
 ## 12. 测试方法
 
-### 测试（131 个用例，全部离线可跑，不需要校园网）
+### 测试（169 个用例，全部离线可跑，不需要校园网）
 
 ```bat
 python -m unittest discover -s tests -v
@@ -435,6 +528,8 @@ python -m unittest discover -s tests -v
 | `test_netcheck.py` | gb2312 解码、等网络、探测校园网、**超时一定会返回、绝不无限等待** |
 | `test_engine_http.py` | HTTP 引擎全部分支：密码错 / 成功 / 已在线 / 无法识别 / 门户不可达 / 提交失败；**密码明文永不进入日志** |
 | `test_integration_mock_portal.py` | **端到端**：在一个假 Dr.COM 门户（`tests/mock_portal.py`）上跑完整的 `login.py`，验证提交的字段与真实门户一致、三种运营商后缀正确、"已在线"时不重复提交、"不在校园网"时安静退出且退出码为 0、**`--check-operator` 能把配错的运营商自动找出来并写回配置**、**门户报告的客户端 IP 优先于本机网卡 IP**（宿舍路由器 NAT 场景） |
+| `test_watch.py` | 常驻监视：在线时**不**重复提交认证、掉线时自动重登、不在校园网时安静等待、**单轮异常不会让监视进程死掉**；以及每次启动都会在日志里留一行心跳、崩溃会写 `crash.log` |
+| `test_preflight.py` | 启动前自检：**精确复现 09-18 那次故障**（`engine_http.py` 第一行多一个 `py`）必须被发现、缺文件/空文件也要发现，并写进 `start_error.log` |
 | `test_login_cli.py` | 命令行解析、`--quiet/--non-interactive` 绝不停下来提问、**初始化向导不设运营商默认值**（按回车不会默默选成中国移动）、**检测出登录地址是从别人机器抄来的**、`--setup` 能贴入本机地址、`.bat` 文件必须是纯 ASCII |
 
 ### 手动测试
@@ -602,6 +697,10 @@ git ls-files | findstr /i "config.json .log"
 
 **Q：日志显示「登录失败：账号或密码错误」，但我确定账号密码没输错。**
 
+> ⚠️ **先看这条**：门户对"密码错"和"**已经在线**"返回的是同一个 `Msg=01`。
+> 如果日志里同时出现"门户保活端点显示本机已经在线"，那就不是密码问题，直接收工即可。
+> 下面才是真正需要排查的情况。
+
 这是**最常见**的一个坑：三家运营商在校园网里是**各自独立的账号库**，
 账号后缀 `@cmcc` / `@unicom` / `@telecom` 就是用来指定去哪个库里查你的账号的。
 **选错运营商的表现，恰恰就是"账号密码明明没错，门户却报账号或密码错误"。**
@@ -639,6 +738,33 @@ git ls-files | findstr /i "config.json .log"
 > 📌 早期版本的初始化向导在"请选择运营商"处**默认值是 1（中国移动）**，
 > 只按回车就会默默选成移动 —— 电信/联通的同学就会遇到这个问题。
 > 现在已改成**必须明确选择**，直接回车会重新提问。
+
+**Q：明明装了开机自启，但某次开机脚本好像根本没跑，日志里一个字都没有。**
+
+**这是一个已经踩过的真坑**，值得单独说清楚。
+
+开机自启走的是 `start.bat` → `pythonw.exe`，而 **`pythonw` 没有控制台、会把 stderr 直接丢掉**。
+于是只要任何一个 `.py` 文件有语法错误，表现就是"脚本好像根本没跑" —— 日志里一行都不会有。
+
+2026-09-18 就是这么丢的当天那次开机登录：
+`engine_http.py` 的第一行被多写了一个 `py`（`py#!/usr/bin/env python`），
+`import` 时直接 `SyntaxError`，而 pythonw 把错误信息吞了。
+
+现在有三道保险：
+
+| 保险 | 作用 |
+|---|---|
+| `start.bat` / `start_watch.bat` 先跑 `tools/preflight.py` | 把所有模块导入一遍；有问题就写进 `start_error.log` 并退出（退出码 3） |
+| `login.py` 每次启动都写一行 `启动：pid=... 参数=...` | "今天到底跑没跑"一查就知道 |
+| 任何未捕获异常都写进 `crash.log` | pythonw 吞掉的东西自己落盘 |
+
+所以以后再遇到"没自动登录"，**先看这三个文件**：
+
+```
+%LOCALAPPDATA%\CampusNetAutoLogin\login.log          ← 每次启动的心跳都在这
+%LOCALAPPDATA%\CampusNetAutoLogin\crash.log          ← 崩溃详情
+%LOCALAPPDATA%\CampusNetAutoLogin\start_error.log    ← 自检失败 / 找不到 Python
+```
 
 **Q：`autofill_client_ip` 是干什么的？**
 
@@ -741,6 +867,10 @@ Selenium 4 自带的 Selenium Manager 需要联网下载 EdgeDriver。首次可�
    需要另外处理（`0MKKey1` 是短信登录按钮，本工具不使用）。
 4. 运营商后缀 `@cmcc / @unicom / @telecom` 取自你所在网段当前的门户模板，
    不同校区/不同网段可能不同，用 `--probe` 可以核对。
+5. `Msg=01` 是有歧义的（见第 8 节）。工具会用保活端点 `:9002` 消歧；
+   万一学校把 9002 封了，就只能回到"可能是密码错、也可能是已经在线"的提示。
+6. 电脑**关机**期间无法做任何事（`--watch` 也救不回来），
+   所以关机之后再开机仍然依赖开机自启那一次。
 
 ---
 
